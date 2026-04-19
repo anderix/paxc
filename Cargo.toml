@@ -1,0 +1,20 @@
+[package]
+name = "paxc"
+version = "0.0.1"
+edition = "2024"
+description = "A compiler for the pax DSL, producing Power Automate cloud flow definitions"
+license = "MIT"
+authors = ["David M. Anderson"]
+repository = "https://github.com/anderix/paxc"
+keywords = ["power-automate", "dsl", "compiler", "logic-apps", "workflow"]
+categories = ["command-line-utilities", "compilers"]
+
+[dependencies]
+
+[lib]
+name = "paxc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "paxc"
+path = "src/main.rs"
