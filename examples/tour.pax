@@ -1,0 +1,39 @@
+// Canonical v1 tour. Every built-in construct appears at least once.
+
+trigger manual
+
+var total: int = 0
+var completed: int = 0
+var pending_titles: array = []
+
+let tasks: array = [
+  { "title": "Buy groceries", "done": true  },
+  { "title": "Write memo",    "done": false },
+  { "title": "Call plumber",  "done": false },
+]
+
+foreach task in tasks {
+  total += 1
+
+  if task.done {
+    completed += 1
+  } else {
+    pending_titles += task.title
+  }
+}
+
+let remaining: int = total - completed
+let summary: string = concat("Completed ", completed, " of ", total, " tasks.")
+
+// Raw-JSON escape hatch for any action pax doesn't model natively.
+raw Send_reminder_email {
+  "type": "Http",
+  "inputs": {
+    "method": "POST",
+    "uri": "https://example.com/notify",
+    "body": {
+      "summary":  "@{variables('summary')}",
+      "pending":  "@{variables('pending_titles')}"
+    }
+  }
+}
