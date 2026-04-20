@@ -139,6 +139,10 @@ fn pa_expr(expr: &Expr) -> String {
         Expr::BinaryOp { op, lhs, rhs } => {
             let fn_name = match op {
                 BinOp::Concat => "concat",
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::Mul => "mul",
+                BinOp::Div => "div",
             };
             format!("{}({}, {})", fn_name, pa_expr(lhs), pa_expr(rhs))
         }
@@ -247,6 +251,52 @@ mod tests {
         assert_eq!(action["inputs"]["variables"][0]["type"], "Integer");
         assert_eq!(action["inputs"]["variables"][0]["value"], 1);
         assert_eq!(action["runAfter"], json!({}));
+    }
+
+    #[test]
+    fn slice15_arithmetic_emits_pa_functions() {
+        let out = compile("var x: int = 2 + 3");
+        let v = &out["definition"]["actions"]["Initialize_x"]["inputs"]["variables"][0]["value"];
+        assert_eq!(v.as_str().unwrap(), "@{add(2, 3)}");
+
+        let out = compile("var x: int = 10 - 4");
+        let v = &out["definition"]["actions"]["Initialize_x"]["inputs"]["variables"][0]["value"];
+        assert_eq!(v.as_str().unwrap(), "@{sub(10, 4)}");
+
+        let out = compile("var x: int = 6 * 7");
+        let v = &out["definition"]["actions"]["Initialize_x"]["inputs"]["variables"][0]["value"];
+        assert_eq!(v.as_str().unwrap(), "@{mul(6, 7)}");
+
+        let out = compile("var x: int = 20 / 4");
+        let v = &out["definition"]["actions"]["Initialize_x"]["inputs"]["variables"][0]["value"];
+        assert_eq!(v.as_str().unwrap(), "@{div(20, 4)}");
+    }
+
+    #[test]
+    fn slice15_precedence_multiplicative_binds_tighter() {
+        let out = compile("var x: int = 2 + 3 * 4");
+        let v = &out["definition"]["actions"]["Initialize_x"]["inputs"]["variables"][0]["value"];
+        assert_eq!(v.as_str().unwrap(), "@{add(2, mul(3, 4))}");
+    }
+
+    #[test]
+    fn slice15_left_associative() {
+        let out = compile("var x: int = 10 - 4 - 1");
+        let v = &out["definition"]["actions"]["Initialize_x"]["inputs"]["variables"][0]["value"];
+        assert_eq!(v.as_str().unwrap(), "@{sub(sub(10, 4), 1)}");
+    }
+
+    #[test]
+    fn slice15_concat_binds_looser_than_arithmetic() {
+        let out = compile(
+            r#"var total: int = 5
+var msg: string = "count: " & total + 1"#,
+        );
+        let v = &out["definition"]["actions"]["Initialize_msg"]["inputs"]["variables"][0]["value"];
+        assert_eq!(
+            v.as_str().unwrap(),
+            "@{concat('count: ', add(variables('total'), 1))}"
+        );
     }
 
     #[test]

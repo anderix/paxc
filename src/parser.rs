@@ -69,17 +69,55 @@ where
         field,
     });
 
-    let atom = literal.clone().map(Expr::Literal).or(ref_path);
+    let atom = literal.clone().map(Expr::Literal).or(ref_path).boxed();
 
-    // Binary operators. For now just `&` (string concat), left-associative.
-    let expr = atom.clone().foldl(
-        just(Token::Amp).ignore_then(atom).repeated(),
-        |lhs, rhs| Expr::BinaryOp {
-            op: BinOp::Concat,
-            lhs: Box::new(lhs),
-            rhs: Box::new(rhs),
-        },
-    );
+    // Precedence, tightest to loosest: atom → product (*, /) → sum (+, -) → concat (&).
+    // All binary operators are left-associative. `.boxed()` at each layer keeps
+    // chumsky's generic type chain from growing exponentially across layers.
+    let mul_op = select! {
+        Token::Star => BinOp::Mul,
+        Token::Slash => BinOp::Div,
+    };
+    let add_op = select! {
+        Token::Plus => BinOp::Add,
+        Token::Minus => BinOp::Sub,
+    };
+    let concat_op = select! {
+        Token::Amp => BinOp::Concat,
+    };
+
+    let product = atom
+        .clone()
+        .foldl(mul_op.then(atom).repeated(), |lhs, (op, rhs)| {
+            Expr::BinaryOp {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            }
+        })
+        .boxed();
+
+    let sum = product
+        .clone()
+        .foldl(add_op.then(product).repeated(), |lhs, (op, rhs)| {
+            Expr::BinaryOp {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            }
+        })
+        .boxed();
+
+    let expr = sum
+        .clone()
+        .foldl(concat_op.then(sum).repeated(), |lhs, (op, rhs)| {
+            Expr::BinaryOp {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            }
+        })
+        .boxed();
 
     let stmt = recursive(|stmt| {
         let block = stmt

@@ -1,0 +1,15 @@
+trigger manual
+
+var total: int = 10
+var completed: int = 7
+
+// Plain arithmetic
+let remaining = total - completed
+let doubled = total * 2
+let half = total / 2
+
+// Precedence: multiplicative binds tighter than additive
+let mixed = 2 + 3 * 4
+
+// Mix arithmetic into a concat; arithmetic binds tighter than &
+var report: string = "Remaining: " & total - completed
