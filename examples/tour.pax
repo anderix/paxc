@@ -1,9 +1,10 @@
-// Canonical v1 tour — every built-in construct appears at least once.
+// Canonical v1.1 tour -- every pax construct appears at least once.
 
 trigger manual
 
 // InitializeVariable with all five v1 types.
 var total: int = 0
+var completed: int = 0
 var label: string = "pending"
 var flag: bool = true
 var results: object = {
@@ -17,23 +18,38 @@ var tasks: array = [
 ]
 var pending_titles: array = []
 
-// Foreach with an iterator, object member access, mutation inside the body.
+// Foreach with iterator, object member access, mutation inside the body.
 foreach task in tasks {
   total += 1
   if task.done {
-    flag = true
+    completed += 1
   } else {
     pending_titles += task.title
-    label = "incomplete"
   }
 }
 
-// Compose (let) captures a value under an action output.
-let region = results.region
-let current_label = label
+// Arithmetic, comparison, boolean ops.
+let remaining = total - completed
+let all_done = remaining == 0 && total > 0
 
-// Raw JSON escape hatch for actions pax doesn't model natively.
-// PA expression strings reference variables, Compose outputs, etc.
+// Function call + string concat (& loosest).
+let summary = concat("Completed ", completed, " of ", total)
+let full_summary = summary & " tasks"
+
+// if / else if / else using comparisons.
+if all_done {
+  label = "done"
+} else if remaining > 0 {
+  label = "in progress"
+} else {
+  label = "empty"
+}
+
+// Compose captures an object member access.
+let region = results.region
+
+// Raw JSON escape hatch for any action pax doesn't model natively.
+// PA expression strings reference variables and Compose outputs by name.
 raw Send_reminder_email {
   "type": "Http",
   "inputs": {
@@ -44,9 +60,9 @@ raw Send_reminder_email {
     },
     "body": {
       "region":  "@{outputs('Compose_region')}",
-      "label":   "@{outputs('Compose_current_label')}",
-      "pending": "@{variables('pending_titles')}",
-      "total":   "@{variables('total')}"
+      "label":   "@{variables('label')}",
+      "summary": "@{outputs('Compose_full_summary')}",
+      "pending": "@{variables('pending_titles')}"
     }
   }
 }

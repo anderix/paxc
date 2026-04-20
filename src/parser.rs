@@ -60,130 +60,154 @@ where
             .delimited_by(just(Token::LBrace), just(Token::RBrace))
     };
 
-    let reference = select! { Token::Ident(s) => Expr::Ref(s.to_string()) };
-
-    let field = just(Token::Dot).ignore_then(select! { Token::Ident(s) => s.to_string() });
-
-    let ref_path = reference.foldl(field.repeated(), |target, field| Expr::Member {
-        target: Box::new(target),
-        field,
-    });
-
-    let atom = literal.clone().map(Expr::Literal).or(ref_path).boxed();
-
+    // Expression parsing is wrapped in `recursive` because function-call args
+    // can be arbitrary expressions (including more calls), so the inner layers
+    // need to reference `expr` itself.
+    //
     // Precedence, tightest to loosest:
     //   atom → unary (!, -) → product (*, /) → sum (+, -) → concat (&)
     //     → comparison (< <= > >= == !=, non-chaining) → and (&&) → or (||)
-    // All binary operators are left-associative. `.boxed()` at each layer keeps
-    // chumsky's generic type chain from growing exponentially across layers.
+    // Binary operators are left-associative (except comparison, which is
+    // non-chaining). `.boxed()` at each layer keeps chumsky's generic type
+    // chain from growing exponentially across layers.
+    let expr = recursive(|expr| {
+        let ident_s = select! { Token::Ident(s) => s.to_string() };
 
-    let unary_op = select! {
-        Token::Bang => UnaryOp::Not,
-        Token::Minus => UnaryOp::Neg,
-    };
+        // A call is an ident followed immediately by `(args)`. We parse the
+        // `(args)` optionally and decide Call vs Ref at the seed stage so
+        // chumsky doesn't have to backtrack.
+        let call_args = expr
+            .clone()
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<Expr>>()
+            .delimited_by(just(Token::LParen), just(Token::RParen));
 
-    let unary = recursive(|unary| {
-        unary_op
-            .then(unary)
-            .map(|(op, operand)| Expr::UnaryOp {
-                op,
-                operand: Box::new(operand),
-            })
-            .or(atom.clone())
-    })
-    .boxed();
-    let mul_op = select! {
-        Token::Star => BinOp::Mul,
-        Token::Slash => BinOp::Div,
-    };
-    let add_op = select! {
-        Token::Plus => BinOp::Add,
-        Token::Minus => BinOp::Sub,
-    };
-    let concat_op = select! {
-        Token::Amp => BinOp::Concat,
-    };
-
-    let product = unary
-        .clone()
-        .foldl(mul_op.then(unary).repeated(), |lhs, (op, rhs)| {
-            Expr::BinaryOp {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            }
-        })
-        .boxed();
-
-    let sum = product
-        .clone()
-        .foldl(add_op.then(product).repeated(), |lhs, (op, rhs)| {
-            Expr::BinaryOp {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            }
-        })
-        .boxed();
-
-    let concat = sum
-        .clone()
-        .foldl(concat_op.then(sum).repeated(), |lhs, (op, rhs)| {
-            Expr::BinaryOp {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            }
-        })
-        .boxed();
-
-    // Comparison layer: non-chaining. `a < b` is allowed, `a < b < c` is a parse error.
-    let comp_op = select! {
-        Token::Lt => BinOp::Less,
-        Token::Le => BinOp::LessEq,
-        Token::Gt => BinOp::Greater,
-        Token::Ge => BinOp::GreaterEq,
-        Token::EqEq => BinOp::Equals,
-        Token::BangEq => BinOp::NotEquals,
-    };
-
-    let comparison = concat
-        .clone()
-        .then(comp_op.then(concat).or_not())
-        .map(|(lhs, tail)| match tail {
-            None => lhs,
-            Some((op, rhs)) => Expr::BinaryOp {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+        let path_seed = ident_s.clone().then(call_args.or_not()).map(
+            |(name, maybe_args)| match maybe_args {
+                Some(args) => Expr::Call { name, args },
+                None => Expr::Ref(name),
             },
+        );
+
+        let field = just(Token::Dot).ignore_then(ident_s);
+
+        let ref_path = path_seed.foldl(field.repeated(), |target, field| Expr::Member {
+            target: Box::new(target),
+            field,
+        });
+
+        let atom = literal.clone().map(Expr::Literal).or(ref_path).boxed();
+
+        let unary_op = select! {
+            Token::Bang => UnaryOp::Not,
+            Token::Minus => UnaryOp::Neg,
+        };
+
+        let unary = recursive(|unary| {
+            unary_op
+                .then(unary)
+                .map(|(op, operand)| Expr::UnaryOp {
+                    op,
+                    operand: Box::new(operand),
+                })
+                .or(atom.clone())
         })
         .boxed();
 
-    let and_op = select! { Token::AmpAmp => BinOp::And };
-    let or_op = select! { Token::PipePipe => BinOp::Or };
+        let mul_op = select! {
+            Token::Star => BinOp::Mul,
+            Token::Slash => BinOp::Div,
+        };
+        let add_op = select! {
+            Token::Plus => BinOp::Add,
+            Token::Minus => BinOp::Sub,
+        };
+        let concat_op = select! {
+            Token::Amp => BinOp::Concat,
+        };
 
-    let and_layer = comparison
-        .clone()
-        .foldl(and_op.then(comparison).repeated(), |lhs, (op, rhs)| {
-            Expr::BinaryOp {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            }
-        })
-        .boxed();
+        let product = unary
+            .clone()
+            .foldl(mul_op.then(unary).repeated(), |lhs, (op, rhs)| {
+                Expr::BinaryOp {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                }
+            })
+            .boxed();
 
-    let expr = and_layer
-        .clone()
-        .foldl(or_op.then(and_layer).repeated(), |lhs, (op, rhs)| {
-            Expr::BinaryOp {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            }
-        })
-        .boxed();
+        let sum = product
+            .clone()
+            .foldl(add_op.then(product).repeated(), |lhs, (op, rhs)| {
+                Expr::BinaryOp {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                }
+            })
+            .boxed();
+
+        let concat = sum
+            .clone()
+            .foldl(concat_op.then(sum).repeated(), |lhs, (op, rhs)| {
+                Expr::BinaryOp {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                }
+            })
+            .boxed();
+
+        // Non-chaining: `a < b` is allowed, `a < b < c` is a parse error.
+        let comp_op = select! {
+            Token::Lt => BinOp::Less,
+            Token::Le => BinOp::LessEq,
+            Token::Gt => BinOp::Greater,
+            Token::Ge => BinOp::GreaterEq,
+            Token::EqEq => BinOp::Equals,
+            Token::BangEq => BinOp::NotEquals,
+        };
+
+        let comparison = concat
+            .clone()
+            .then(comp_op.then(concat).or_not())
+            .map(|(lhs, tail)| match tail {
+                None => lhs,
+                Some((op, rhs)) => Expr::BinaryOp {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+            })
+            .boxed();
+
+        let and_op = select! { Token::AmpAmp => BinOp::And };
+        let or_op = select! { Token::PipePipe => BinOp::Or };
+
+        let and_layer = comparison
+            .clone()
+            .foldl(and_op.then(comparison).repeated(), |lhs, (op, rhs)| {
+                Expr::BinaryOp {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                }
+            })
+            .boxed();
+
+        and_layer
+            .clone()
+            .foldl(or_op.then(and_layer).repeated(), |lhs, (op, rhs)| {
+                Expr::BinaryOp {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                }
+            })
+            .boxed()
+    });
 
     let stmt = recursive(|stmt| {
         let block = stmt

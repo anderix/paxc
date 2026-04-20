@@ -134,6 +134,12 @@ pub enum Expr {
         op: UnaryOp,
         operand: Box<Expr>,
     },
+    /// PA expression function call: `name(args...)`. The name is passed
+    /// through unchecked -- any valid PA function or user-defined one works.
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
 }
 
 #[derive(Debug, Clone)]

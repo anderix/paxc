@@ -377,6 +377,14 @@ fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, Res
                 operand: Box::new(operand),
             })
         }
+        Expr::Call { name, args } => {
+            let resolved_args: Result<Vec<_>, _> =
+                args.iter().map(|a| resolve_expr(a, env)).collect();
+            Ok(Expr::Call {
+                name: name.clone(),
+                args: resolved_args?,
+            })
+        }
     }
 }
 

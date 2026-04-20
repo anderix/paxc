@@ -178,6 +178,10 @@ fn pa_expr(expr: &Expr) -> String {
             // PA has no unary minus; synthesize via sub(0, operand).
             UnaryOp::Neg => format!("sub(0, {})", pa_expr(operand)),
         },
+        Expr::Call { name, args } => {
+            let args_str: Vec<String> = args.iter().map(pa_expr).collect();
+            format!("{}({})", name, args_str.join(", "))
+        }
         Expr::Ref(_) => {
             unreachable!("resolver should have rewritten Expr::Ref before emit")
         }
@@ -445,6 +449,55 @@ if !ok {
         );
         let cond = &out["definition"]["actions"]["Condition"]["expression"];
         assert_eq!(cond.as_str().unwrap(), "@not(variables('ok'))");
+    }
+
+    #[test]
+    fn slice18_function_call_emits_pa_function() {
+        let out = compile(
+            r#"var a: int = 5
+let n = length("hello")"#,
+        );
+        let v = &out["definition"]["actions"]["Compose_n"]["inputs"];
+        assert_eq!(v.as_str().unwrap(), "@{length('hello')}");
+    }
+
+    #[test]
+    fn slice18_call_with_multiple_args_and_exprs() {
+        let out = compile(
+            r#"var total: int = 10
+var completed: int = 7
+let msg = concat("done ", completed, " of ", total)"#,
+        );
+        let v = &out["definition"]["actions"]["Compose_msg"]["inputs"];
+        assert_eq!(
+            v.as_str().unwrap(),
+            "@{concat('done ', variables('completed'), ' of ', variables('total'))}"
+        );
+    }
+
+    #[test]
+    fn slice18_nested_calls() {
+        let out = compile(
+            r#"var a: int = 5
+let n = length(concat("x", "y"))"#,
+        );
+        let v = &out["definition"]["actions"]["Compose_n"]["inputs"];
+        assert_eq!(v.as_str().unwrap(), "@{length(concat('x', 'y'))}");
+    }
+
+    #[test]
+    fn slice18_call_can_be_a_condition() {
+        let out = compile(
+            r#"var items: array = []
+if empty(items) {
+}"#,
+        );
+        // Bare call result — we don't know its type, so auto-wrap kicks in.
+        let cond = &out["definition"]["actions"]["Condition"]["expression"];
+        assert_eq!(
+            cond.as_str().unwrap(),
+            "@equals(empty(variables('items')), true)"
+        );
     }
 
     #[test]

@@ -49,6 +49,8 @@ pub enum Token<'src> {
     RBracket,
     LBrace,
     RBrace,
+    LParen,
+    RParen,
 }
 
 pub fn lexer<'src>()
@@ -103,6 +105,8 @@ pub fn lexer<'src>()
         just(']').to(Token::RBracket),
         just('{').to(Token::LBrace),
         just('}').to(Token::RBrace),
+        just('(').to(Token::LParen),
+        just(')').to(Token::RParen),
     ));
 
     let ident = text::ascii::ident().map(|s: &str| match s {

@@ -1,0 +1,19 @@
+trigger manual
+
+var total: int = 10
+var completed: int = 7
+
+// Single-arg call
+let label_length = length("pending")
+
+// Multi-arg call with mixed literal and expression arguments
+let summary = concat("Completed ", completed, " of ", total, " tasks")
+
+// Nested calls
+let upper = toUpper(concat("hello ", "world"))
+
+// Call result in a condition (auto-wraps since we can't prove it's boolean)
+var items: array = []
+if empty(items) {
+  total = 0
+}
