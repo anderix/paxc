@@ -152,10 +152,10 @@ fn resolve_statements(
     for stmt in statements {
         let (action_name, kind) = match stmt {
             Stmt::VarDecl { name, ty, value } => {
-                let value = resolve_expr(value, env)?;
                 if env.contains_key(name) {
                     return Err(ResolveError::DuplicateVariable { name: name.clone() });
                 }
+                let value = resolve_expr(value, env)?;
                 env.insert(name.clone(), Binding::Var { ty: ty.clone() });
                 let action_name =
                     unique_name(&format!("Initialize_{name}"), name_counts);
@@ -167,10 +167,10 @@ fn resolve_statements(
                 (action_name, kind)
             }
             Stmt::Let { name, value } => {
-                let value = resolve_expr(value, env)?;
                 if env.contains_key(name) {
                     return Err(ResolveError::DuplicateVariable { name: name.clone() });
                 }
+                let value = resolve_expr(value, env)?;
                 let action_name = unique_name(&format!("Compose_{name}"), name_counts);
                 env.insert(
                     name.clone(),

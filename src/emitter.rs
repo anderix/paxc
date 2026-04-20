@@ -149,7 +149,9 @@ fn pa_expr(expr: &Expr) -> String {
         Expr::VarRef(name) => format!("variables('{name}')"),
         Expr::ComposeRef(action_name) => format!("outputs('{action_name}')"),
         Expr::IteratorRef(action_name) => format!("items('{action_name}')"),
-        Expr::Member { target, field } => format!("{}?['{}']", pa_expr(target), field),
+        Expr::Member { target, field } => {
+            format!("{}?['{}']", pa_expr(target), field.replace('\'', "''"))
+        }
         Expr::Literal(lit) => pa_literal(lit),
         Expr::BinaryOp { op, lhs, rhs } => {
             // PA has no `notEquals`; synthesize it as `not(equals(...))`.
