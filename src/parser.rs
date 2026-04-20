@@ -3,7 +3,7 @@
 //! Slice 1 recognizes a sequence of `var <ident>: <type> = <literal>`
 //! declarations and builds a `Program` AST.
 
-use crate::ast::{Expr, Literal, Program, Stmt, Type};
+use crate::ast::{AssignOp, Expr, Literal, Program, Stmt, Type};
 use crate::lexer::{Span, Token};
 use chumsky::{input::ValueInput, prelude::*};
 
@@ -58,15 +58,31 @@ where
         .then_ignore(just(Token::Colon))
         .then(ty)
         .then_ignore(just(Token::Eq))
-        .then(expr)
+        .then(expr.clone())
         .map(|((name, ty), value)| Stmt::VarDecl {
             name: name.to_string(),
             ty,
             value,
         });
 
-    var_decl
-        .repeated()
+    let assign_op = select! {
+        Token::Eq => AssignOp::Set,
+        Token::PlusEq => AssignOp::Add,
+        Token::MinusEq => AssignOp::Subtract,
+    };
+
+    let assign = name
+        .then(assign_op)
+        .then(expr)
+        .map(|((name, op), value)| Stmt::Assign {
+            name: name.to_string(),
+            op,
+            value,
+        });
+
+    let stmt = var_decl.or(assign);
+
+    stmt.repeated()
         .collect::<Vec<_>>()
         .map(|statements| Program { statements })
 }
@@ -98,6 +114,7 @@ mod tests {
                 assert!(matches!(ty, Type::Int));
                 assert!(matches!(value, Expr::Literal(Literal::Int(1))));
             }
+            _ => panic!("expected var decl"),
         }
     }
 
@@ -123,6 +140,21 @@ mod tests {
                 assert!(matches!(&entries[0].1, Literal::String(s) if s == "a"));
                 assert!(matches!(&entries[1].1, Literal::Bool(true)));
             }
+            _ => panic!("expected var decl"),
+        }
+    }
+
+    #[test]
+    fn slice6_assign_statement() {
+        let prog = parse("var x: int = 1\nx += 2");
+        assert_eq!(prog.statements.len(), 2);
+        match &prog.statements[1] {
+            Stmt::Assign { name, op, value } => {
+                assert_eq!(name, "x");
+                assert!(matches!(op, AssignOp::Add));
+                assert!(matches!(value, Expr::Literal(Literal::Int(2))));
+            }
+            _ => panic!("expected assign"),
         }
     }
 }

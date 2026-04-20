@@ -16,9 +16,21 @@ pub enum Stmt {
         ty: Type,
         value: Expr,
     },
+    Assign {
+        name: String,
+        op: AssignOp,
+        value: Expr,
+    },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignOp {
+    Set,
+    Add,
+    Subtract,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Int,
     String,

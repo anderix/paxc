@@ -18,6 +18,8 @@ pub enum Token<'src> {
     Bool(bool),
     Colon,
     Eq,
+    PlusEq,
+    MinusEq,
     Comma,
     LBracket,
     RBracket,
@@ -38,6 +40,11 @@ pub fn lexer<'src>()
         .then_ignore(just('"'))
         .map(Token::Str);
 
+    let compound = choice((
+        just("+=").to(Token::PlusEq),
+        just("-=").to(Token::MinusEq),
+    ));
+
     let ctrl = choice((
         just(':').to(Token::Colon),
         just('=').to(Token::Eq),
@@ -55,7 +62,7 @@ pub fn lexer<'src>()
         _ => Token::Ident(s),
     });
 
-    let token = int.or(str_).or(ctrl).or(ident);
+    let token = int.or(str_).or(compound).or(ctrl).or(ident);
 
     let comment = just("//")
         .then(any().and_is(just('\n').not()).repeated())
@@ -120,6 +127,26 @@ mod tests {
                 Token::Ident("bool"),
                 Token::Eq,
                 Token::Bool(true),
+            ]
+        );
+    }
+
+    #[test]
+    fn slice6_compound_assign_ops() {
+        assert_eq!(
+            lex("counter += 1"),
+            vec![
+                Token::Ident("counter"),
+                Token::PlusEq,
+                Token::Int(1),
+            ]
+        );
+        assert_eq!(
+            lex("counter -= 1"),
+            vec![
+                Token::Ident("counter"),
+                Token::MinusEq,
+                Token::Int(1),
             ]
         );
     }

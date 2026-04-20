@@ -5,8 +5,8 @@
 //! an `actions` map. Action keys and `runAfter` predecessors come from the
 //! resolver, so this layer is purely a tree-to-JSON translation.
 
-use crate::ast::{Expr, Literal, Stmt, Type};
-use crate::resolver::{ResolvedAction, ResolvedProgram};
+use crate::ast::{Expr, Literal, Type};
+use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram};
 use serde_json::{Map, Value, json};
 
 const SCHEMA_URL: &str =
@@ -35,13 +35,44 @@ pub fn emit(program: &ResolvedProgram) -> Value {
 }
 
 fn emit_action(action: &ResolvedAction) -> Value {
-    let body = match &action.stmt {
-        Stmt::VarDecl { name, ty, value } => emit_var_decl(name, ty, value),
+    let body = match &action.kind {
+        ActionKind::InitializeVariable { var, ty, value } => emit_initialize(var, ty, value),
+        ActionKind::SetVariable { var, value } => emit_mutation("SetVariable", var, value),
+        ActionKind::IncrementVariable { var, value } => {
+            emit_mutation("IncrementVariable", var, value)
+        }
+        ActionKind::DecrementVariable { var, value } => {
+            emit_mutation("DecrementVariable", var, value)
+        }
+        ActionKind::AppendToStringVariable { var, value } => {
+            emit_mutation("AppendToStringVariable", var, value)
+        }
+        ActionKind::AppendToArrayVariable { var, value } => {
+            emit_mutation("AppendToArrayVariable", var, value)
+        }
     };
     splice_run_after(body, &action.run_after)
 }
 
-fn emit_var_decl(name: &str, ty: &Type, value: &Expr) -> Value {
+fn emit_mutation(action_type: &str, var: &str, value: &Expr) -> Value {
+    let value_json = expr_to_json(value);
+    json!({
+        "type": action_type,
+        "inputs": {
+            "name": var,
+            "value": value_json,
+        }
+    })
+}
+
+fn expr_to_json(value: &Expr) -> Value {
+    match value {
+        Expr::Literal(lit) => literal_to_json(lit),
+        Expr::Ref(var_name) => json!(format!("@{{variables('{var_name}')}}")),
+    }
+}
+
+fn emit_initialize(name: &str, ty: &Type, value: &Expr) -> Value {
     let ty_str = match ty {
         Type::Int => "Integer",
         Type::String => "String",
@@ -49,10 +80,7 @@ fn emit_var_decl(name: &str, ty: &Type, value: &Expr) -> Value {
         Type::Array => "Array",
         Type::Object => "Object",
     };
-    let value_json = match value {
-        Expr::Literal(lit) => literal_to_json(lit),
-        Expr::Ref(var_name) => json!(format!("@{{variables('{var_name}')}}")),
-    };
+    let value_json = expr_to_json(value);
     json!({
         "type": "InitializeVariable",
         "inputs": {
