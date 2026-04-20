@@ -13,19 +13,22 @@ const SCHEMA_URL: &str =
     "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#";
 
 pub fn emit(program: &ResolvedProgram) -> Value {
-    let mut actions = Map::new();
-    for action in &program.actions {
-        actions.insert(action.name.clone(), emit_action(action));
-    }
-
     json!({
         "definition": {
             "$schema": SCHEMA_URL,
             "contentVersion": "1.0.0.0",
             "triggers": emit_trigger(&program.trigger),
-            "actions": Value::Object(actions),
+            "actions": build_actions_map(&program.actions),
         }
     })
+}
+
+fn build_actions_map(actions: &[ResolvedAction]) -> Value {
+    let mut map = Map::new();
+    for action in actions {
+        map.insert(action.name.clone(), emit_action(action));
+    }
+    Value::Object(map)
 }
 
 fn emit_trigger(trigger: &Trigger) -> Value {
@@ -58,8 +61,29 @@ fn emit_action(action: &ResolvedAction) -> Value {
         }
         ActionKind::Compose { value } => emit_compose(value),
         ActionKind::Raw { body } => emit_raw(body),
+        ActionKind::Condition {
+            condition,
+            true_branch,
+            false_branch,
+        } => emit_condition(condition, true_branch, false_branch),
     };
     splice_run_after(body, &action.run_after)
+}
+
+fn emit_condition(
+    condition: &Expr,
+    true_branch: &[ResolvedAction],
+    false_branch: &[ResolvedAction],
+) -> Value {
+    let expression = format!("@equals({}, true)", pa_expr(condition));
+    json!({
+        "type": "If",
+        "expression": expression,
+        "actions": build_actions_map(true_branch),
+        "else": {
+            "actions": build_actions_map(false_branch),
+        }
+    })
 }
 
 fn emit_compose(value: &Expr) -> Value {

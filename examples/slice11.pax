@@ -1,0 +1,28 @@
+trigger manual
+
+var flag: bool = true
+var counter: int = 0
+var message: string = "pending"
+
+if flag {
+  counter += 1
+  message = "confirmed"
+} else {
+  counter -= 1
+  message = "declined"
+}
+
+var options: object = {
+  "enabled": true,
+  "verbose": false
+}
+
+if options.enabled {
+  if options.verbose {
+    message = "verbose mode"
+  } else {
+    message = "quiet mode"
+  }
+} else {
+  message = "disabled"
+}

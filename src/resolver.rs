@@ -61,6 +61,11 @@ pub enum ActionKind {
     Raw {
         body: Vec<(String, Literal)>,
     },
+    Condition {
+        condition: Expr,
+        true_branch: Vec<ResolvedAction>,
+        false_branch: Vec<ResolvedAction>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -121,21 +126,33 @@ fn type_name(ty: &Type) -> &'static str {
 }
 
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
-    let mut actions: Vec<ResolvedAction> = Vec::with_capacity(program.statements.len());
     let mut env: HashMap<String, Binding> = HashMap::new();
     let mut name_counts: HashMap<String, u32> = HashMap::new();
+    let actions = resolve_statements(&program.statements, &mut env, &mut name_counts)?;
+    Ok(ResolvedProgram {
+        trigger: program.trigger.clone(),
+        actions,
+    })
+}
+
+fn resolve_statements(
+    statements: &[Stmt],
+    env: &mut HashMap<String, Binding>,
+    name_counts: &mut HashMap<String, u32>,
+) -> Result<Vec<ResolvedAction>, ResolveError> {
+    let mut actions: Vec<ResolvedAction> = Vec::with_capacity(statements.len());
     let mut prev_name: Option<String> = None;
 
-    for stmt in &program.statements {
+    for stmt in statements {
         let (action_name, kind) = match stmt {
             Stmt::VarDecl { name, ty, value } => {
-                let value = resolve_expr(value, &env)?;
+                let value = resolve_expr(value, env)?;
                 if env.contains_key(name) {
                     return Err(ResolveError::DuplicateVariable { name: name.clone() });
                 }
                 env.insert(name.clone(), Binding::Var { ty: ty.clone() });
                 let action_name =
-                    unique_name(&format!("Initialize_{name}"), &mut name_counts);
+                    unique_name(&format!("Initialize_{name}"), name_counts);
                 let kind = ActionKind::InitializeVariable {
                     var: name.clone(),
                     ty: ty.clone(),
@@ -144,11 +161,11 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
                 (action_name, kind)
             }
             Stmt::Let { name, value } => {
-                let value = resolve_expr(value, &env)?;
+                let value = resolve_expr(value, env)?;
                 if env.contains_key(name) {
                     return Err(ResolveError::DuplicateVariable { name: name.clone() });
                 }
-                let action_name = unique_name(&format!("Compose_{name}"), &mut name_counts);
+                let action_name = unique_name(&format!("Compose_{name}"), name_counts);
                 env.insert(
                     name.clone(),
                     Binding::Let {
@@ -158,12 +175,12 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
                 (action_name, ActionKind::Compose { value })
             }
             Stmt::Assign { name, op, value } => {
-                let value = resolve_expr(value, &env)?;
+                let value = resolve_expr(value, env)?;
                 match env.get(name) {
                     Some(Binding::Var { ty }) => {
                         let ty = ty.clone();
                         let (base, kind) = lower_assign(name, *op, &ty, value)?;
-                        (unique_name(&base, &mut name_counts), kind)
+                        (unique_name(&base, name_counts), kind)
                     }
                     Some(Binding::Let { .. }) => {
                         return Err(ResolveError::CannotAssignToImmutable {
@@ -176,8 +193,26 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
                 }
             }
             Stmt::Raw { name, body } => {
-                let action_name = unique_name(name, &mut name_counts);
+                let action_name = unique_name(name, name_counts);
                 (action_name, ActionKind::Raw { body: body.clone() })
+            }
+            Stmt::If {
+                condition,
+                true_branch,
+                false_branch,
+            } => {
+                let condition = resolve_expr(condition, env)?;
+                let action_name = unique_name("Condition", name_counts);
+                let true_actions = resolve_statements(true_branch, env, name_counts)?;
+                let false_actions = resolve_statements(false_branch, env, name_counts)?;
+                (
+                    action_name,
+                    ActionKind::Condition {
+                        condition,
+                        true_branch: true_actions,
+                        false_branch: false_actions,
+                    },
+                )
             }
         };
 
@@ -193,10 +228,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         });
     }
 
-    Ok(ResolvedProgram {
-        trigger: program.trigger.clone(),
-        actions,
-    })
+    Ok(actions)
 }
 
 fn lower_assign(

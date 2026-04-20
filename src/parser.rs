@@ -71,48 +71,80 @@ where
 
     let expr = literal.clone().map(Expr::Literal).or(ref_path);
 
-    let var_decl = just(Token::Var)
-        .ignore_then(name)
-        .then_ignore(just(Token::Colon))
-        .then(ty)
-        .then_ignore(just(Token::Eq))
-        .then(expr.clone())
-        .map(|((name, ty), value)| Stmt::VarDecl {
-            name: name.to_string(),
-            ty,
-            value,
+    let stmt = recursive(|stmt| {
+        let block = stmt
+            .clone()
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace));
+
+        let var_decl = just(Token::Var)
+            .ignore_then(name)
+            .then_ignore(just(Token::Colon))
+            .then(ty)
+            .then_ignore(just(Token::Eq))
+            .then(expr.clone())
+            .map(|((name, ty), value)| Stmt::VarDecl {
+                name: name.to_string(),
+                ty,
+                value,
+            });
+
+        let assign_op = select! {
+            Token::Eq => AssignOp::Set,
+            Token::PlusEq => AssignOp::Add,
+            Token::MinusEq => AssignOp::Subtract,
+        };
+
+        let assign = name
+            .then(assign_op)
+            .then(expr.clone())
+            .map(|((name, op), value)| Stmt::Assign {
+                name: name.to_string(),
+                op,
+                value,
+            });
+
+        let raw_stmt = just(Token::Raw)
+            .ignore_then(select! { Token::Ident(s) => s.to_string() })
+            .then(object_entries.clone())
+            .map(|(name, body)| Stmt::Raw { name, body });
+
+        let let_decl = just(Token::Let)
+            .ignore_then(name)
+            .then_ignore(just(Token::Eq))
+            .then(expr.clone())
+            .map(|(name, value)| Stmt::Let {
+                name: name.to_string(),
+                value,
+            });
+
+        let if_stmt = recursive(|if_stmt| {
+            just(Token::If)
+                .ignore_then(expr.clone())
+                .then(block.clone())
+                .then(
+                    just(Token::Else)
+                        .ignore_then(
+                            if_stmt
+                                .map(|s| vec![s])
+                                .or(block.clone()),
+                        )
+                        .or_not(),
+                )
+                .map(|((condition, true_branch), else_branch)| Stmt::If {
+                    condition,
+                    true_branch,
+                    false_branch: else_branch.unwrap_or_default(),
+                })
         });
 
-    let assign_op = select! {
-        Token::Eq => AssignOp::Set,
-        Token::PlusEq => AssignOp::Add,
-        Token::MinusEq => AssignOp::Subtract,
-    };
-
-    let assign = name
-        .then(assign_op)
-        .then(expr.clone())
-        .map(|((name, op), value)| Stmt::Assign {
-            name: name.to_string(),
-            op,
-            value,
-        });
-
-    let raw_stmt = just(Token::Raw)
-        .ignore_then(select! { Token::Ident(s) => s.to_string() })
-        .then(object_entries)
-        .map(|(name, body)| Stmt::Raw { name, body });
-
-    let let_decl = just(Token::Let)
-        .ignore_then(name)
-        .then_ignore(just(Token::Eq))
-        .then(expr.clone())
-        .map(|(name, value)| Stmt::Let {
-            name: name.to_string(),
-            value,
-        });
-
-    let stmt = var_decl.or(let_decl).or(raw_stmt).or(assign);
+        var_decl
+            .or(let_decl)
+            .or(if_stmt)
+            .or(raw_stmt)
+            .or(assign)
+    });
 
     let trigger = just(Token::Trigger).ignore_then(select! {
         Token::Ident("manual") => Trigger::Manual,

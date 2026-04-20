@@ -35,6 +35,11 @@ pub enum Stmt {
         name: String,
         value: Expr,
     },
+    If {
+        condition: Expr,
+        true_branch: Vec<Stmt>,
+        false_branch: Vec<Stmt>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
