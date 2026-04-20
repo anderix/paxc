@@ -85,6 +85,11 @@ pub enum ResolveError {
     UndefinedVariable { name: String },
     InvalidOperation { op: AssignOp, name: String, ty: Type },
     CannotAssignToImmutable { name: String },
+    /// `var` declarations must be at the top level of the flow. PA's
+    /// `InitializeVariable` action is only valid at the workflow scope,
+    /// so nesting one inside a Condition or Apply_to_each produces an
+    /// invalid definition.
+    NestedVarDeclaration { name: String },
 }
 
 impl fmt::Display for ResolveError {
@@ -115,6 +120,12 @@ impl fmt::Display for ResolveError {
                     "cannot assign to `{name}`: `let` bindings are immutable"
                 )
             }
+            ResolveError::NestedVarDeclaration { name } => {
+                write!(
+                    f,
+                    "`var {name}` must be declared at the top level of the flow"
+                )
+            }
         }
     }
 }
@@ -134,17 +145,21 @@ fn type_name(ty: &Type) -> &'static str {
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
     let mut env: HashMap<String, Binding> = HashMap::new();
     let mut name_counts: HashMap<String, u32> = HashMap::new();
-    let actions = resolve_statements(&program.statements, &mut env, &mut name_counts)?;
+    let actions = resolve_statements(&program.statements, &mut env, &mut name_counts, true)?;
     Ok(ResolvedProgram {
         trigger: program.trigger.clone(),
         actions,
     })
 }
 
+/// `top_level` controls whether `var` declarations are permitted. PA requires
+/// `InitializeVariable` actions at workflow scope, so nested `var` decls must
+/// be rejected at compile time. `let` / assign / raw are fine at any depth.
 fn resolve_statements(
     statements: &[Stmt],
     env: &mut HashMap<String, Binding>,
     name_counts: &mut HashMap<String, u32>,
+    top_level: bool,
 ) -> Result<Vec<ResolvedAction>, ResolveError> {
     let mut actions: Vec<ResolvedAction> = Vec::with_capacity(statements.len());
     let mut prev_name: Option<String> = None;
@@ -152,6 +167,9 @@ fn resolve_statements(
     for stmt in statements {
         let (action_name, kind) = match stmt {
             Stmt::VarDecl { name, ty, value } => {
+                if !top_level {
+                    return Err(ResolveError::NestedVarDeclaration { name: name.clone() });
+                }
                 if env.contains_key(name) {
                     return Err(ResolveError::DuplicateVariable { name: name.clone() });
                 }
@@ -209,8 +227,16 @@ fn resolve_statements(
             } => {
                 let condition = resolve_expr(condition, env)?;
                 let action_name = unique_name("Condition", name_counts);
-                let true_actions = resolve_statements(true_branch, env, name_counts)?;
-                let false_actions = resolve_statements(false_branch, env, name_counts)?;
+                // Branches scope `let` bindings to themselves: save the env,
+                // resolve each branch against it, restore after. name_counts
+                // stays shared since PA action names are globally unique.
+                let saved_env = env.clone();
+                let true_actions =
+                    resolve_statements(true_branch, env, name_counts, false)?;
+                *env = saved_env.clone();
+                let false_actions =
+                    resolve_statements(false_branch, env, name_counts, false)?;
+                *env = saved_env;
                 (
                     action_name,
                     ActionKind::Condition {
@@ -227,24 +253,17 @@ fn resolve_statements(
             } => {
                 let collection = resolve_expr(collection, env)?;
                 let action_name = unique_name("Apply_to_each", name_counts);
-                // Lexically scope the iterator: save any prior binding with the
-                // same name, install the iterator while resolving the body,
-                // then restore the saved binding (or remove if none).
-                let prev = env.insert(
+                // Iterator and any body-local `let` are scoped to the loop body.
+                let saved_env = env.clone();
+                env.insert(
                     iter.clone(),
                     Binding::Iterator {
                         action_name: action_name.clone(),
                     },
                 );
-                let body_actions = resolve_statements(body, env, name_counts)?;
-                match prev {
-                    Some(b) => {
-                        env.insert(iter.clone(), b);
-                    }
-                    None => {
-                        env.remove(iter);
-                    }
-                }
+                let body_actions =
+                    resolve_statements(body, env, name_counts, false)?;
+                *env = saved_env;
                 (
                     action_name,
                     ActionKind::Foreach {
@@ -696,6 +715,148 @@ mod tests {
                 name: "immut".to_string()
             }
         );
+    }
+
+    #[test]
+    fn nested_var_decl_in_if_branch_is_error() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var_ty("flag", Type::Bool),
+                Stmt::If {
+                    condition: Expr::Ref("flag".to_string()),
+                    true_branch: vec![var("inner")],
+                    false_branch: vec![],
+                },
+            ],
+        };
+        assert_eq!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::NestedVarDeclaration {
+                name: "inner".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn nested_var_decl_in_foreach_body_is_error() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var_ty("items", Type::Array),
+                Stmt::Foreach {
+                    iter: "x".to_string(),
+                    collection: Expr::Ref("items".to_string()),
+                    body: vec![var("inner")],
+                },
+            ],
+        };
+        assert_eq!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::NestedVarDeclaration {
+                name: "inner".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn let_in_if_branch_does_not_leak_to_outer_scope() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var_ty("flag", Type::Bool),
+                Stmt::If {
+                    condition: Expr::Ref("flag".to_string()),
+                    true_branch: vec![let_stmt(
+                        "inner",
+                        Expr::Literal(Literal::Int(1)),
+                    )],
+                    false_branch: vec![],
+                },
+                // Reference `inner` from outer scope: should fail, because
+                // the `let` was scoped to the true branch.
+                let_stmt("leak", Expr::Ref("inner".to_string())),
+            ],
+        };
+        assert_eq!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::UndefinedVariable {
+                name: "inner".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn let_in_true_branch_does_not_leak_to_false_branch() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var_ty("flag", Type::Bool),
+                Stmt::If {
+                    condition: Expr::Ref("flag".to_string()),
+                    true_branch: vec![let_stmt(
+                        "inner",
+                        Expr::Literal(Literal::Int(1)),
+                    )],
+                    false_branch: vec![let_stmt(
+                        "copy",
+                        Expr::Ref("inner".to_string()),
+                    )],
+                },
+            ],
+        };
+        assert_eq!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::UndefinedVariable {
+                name: "inner".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn let_in_foreach_body_does_not_leak_to_outer_scope() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var_ty("items", Type::Array),
+                Stmt::Foreach {
+                    iter: "x".to_string(),
+                    collection: Expr::Ref("items".to_string()),
+                    body: vec![let_stmt(
+                        "per_item",
+                        Expr::Literal(Literal::Int(1)),
+                    )],
+                },
+                let_stmt("leak", Expr::Ref("per_item".to_string())),
+            ],
+        };
+        assert_eq!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::UndefinedVariable {
+                name: "per_item".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn nested_let_can_still_reference_outer_vars() {
+        // Regression guard: scoping a nested `let` must not break its ability
+        // to see outer-scope declarations.
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var_ty("outer", Type::Int),
+                Stmt::If {
+                    condition: Expr::Literal(Literal::Bool(true)),
+                    true_branch: vec![let_stmt(
+                        "copy",
+                        Expr::Ref("outer".to_string()),
+                    )],
+                    false_branch: vec![],
+                },
+            ],
+        };
+        assert!(resolve(&prog).is_ok());
     }
 
     #[test]
