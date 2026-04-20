@@ -62,6 +62,27 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    Less,
+    LessEq,
+    Greater,
+    GreaterEq,
+    Equals,
+    NotEquals,
+}
+
+impl BinOp {
+    /// True when this operator's result is a boolean (comparison ops).
+    pub fn is_boolean(self) -> bool {
+        matches!(
+            self,
+            BinOp::Less
+                | BinOp::LessEq
+                | BinOp::Greater
+                | BinOp::GreaterEq
+                | BinOp::Equals
+                | BinOp::NotEquals
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

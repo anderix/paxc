@@ -108,7 +108,7 @@ where
         })
         .boxed();
 
-    let expr = sum
+    let concat = sum
         .clone()
         .foldl(concat_op.then(sum).repeated(), |lhs, (op, rhs)| {
             Expr::BinaryOp {
@@ -116,6 +116,29 @@ where
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
             }
+        })
+        .boxed();
+
+    // Comparison layer: non-chaining. `a < b` is allowed, `a < b < c` is a parse error.
+    let comp_op = select! {
+        Token::Lt => BinOp::Less,
+        Token::Le => BinOp::LessEq,
+        Token::Gt => BinOp::Greater,
+        Token::Ge => BinOp::GreaterEq,
+        Token::EqEq => BinOp::Equals,
+        Token::BangEq => BinOp::NotEquals,
+    };
+
+    let expr = concat
+        .clone()
+        .then(comp_op.then(concat).or_not())
+        .map(|(lhs, tail)| match tail {
+            None => lhs,
+            Some((op, rhs)) => Expr::BinaryOp {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
         })
         .boxed();
 
@@ -277,6 +300,21 @@ mod tests {
             }
             _ => panic!("expected var decl"),
         }
+    }
+
+    #[test]
+    fn slice16_comparison_chain_is_parse_error() {
+        let src = "trigger manual\nvar a: int = 1\nlet x = a < 2 < 3";
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        let result = parser().parse(
+            tokens
+                .as_slice()
+                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+        );
+        assert!(
+            result.has_errors(),
+            "chained comparisons should not parse"
+        );
     }
 
     #[test]

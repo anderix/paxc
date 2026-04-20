@@ -1,0 +1,23 @@
+trigger manual
+
+var total: int = 10
+var completed: int = 7
+var label: string = "pending"
+
+// Comparison in condition: no auto-wrap, emits @greater(...) directly
+if completed > 0 {
+  label = "in progress"
+}
+
+// Equality
+if total == completed {
+  label = "done"
+}
+
+// Not-equals (compiles to not(equals(...)))
+if completed != total {
+  label = "partial"
+}
+
+// Comparison into a let
+let remaining_positive = total - completed > 0

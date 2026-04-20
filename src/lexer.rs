@@ -34,6 +34,12 @@ pub enum Token<'src> {
     Minus,
     Star,
     Slash,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    EqEq,
+    BangEq,
     Comma,
     Dot,
     LBracket,
@@ -69,6 +75,10 @@ pub fn lexer<'src>()
         just("+=").to(Token::PlusEq),
         just("-=").to(Token::MinusEq),
         just("&=").to(Token::AmpEq),
+        just("<=").to(Token::Le),
+        just(">=").to(Token::Ge),
+        just("==").to(Token::EqEq),
+        just("!=").to(Token::BangEq),
     ));
 
     let ctrl = choice((
@@ -79,6 +89,8 @@ pub fn lexer<'src>()
         just('-').to(Token::Minus),
         just('*').to(Token::Star),
         just('/').to(Token::Slash),
+        just('<').to(Token::Lt),
+        just('>').to(Token::Gt),
         just(',').to(Token::Comma),
         just('.').to(Token::Dot),
         just('[').to(Token::LBracket),

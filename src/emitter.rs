@@ -84,7 +84,14 @@ fn emit_condition(
     true_branch: &[ResolvedAction],
     false_branch: &[ResolvedAction],
 ) -> Value {
-    let expression = format!("@equals({}, true)", pa_expr(condition));
+    // Skip the `equals(_, true)` auto-wrap when the condition is already a
+    // boolean-producing expression (a comparison op). Bare refs, member access,
+    // etc. still need the wrap so PA sees a boolean.
+    let expression = if is_boolean_expr(condition) {
+        format!("@{}", pa_expr(condition))
+    } else {
+        format!("@equals({}, true)", pa_expr(condition))
+    };
     json!({
         "type": "If",
         "expression": expression,
@@ -93,6 +100,10 @@ fn emit_condition(
             "actions": build_actions_map(false_branch),
         }
     })
+}
+
+fn is_boolean_expr(expr: &Expr) -> bool {
+    matches!(expr, Expr::BinaryOp { op, .. } if op.is_boolean())
 }
 
 fn emit_compose(value: &Expr) -> Value {
@@ -137,12 +148,22 @@ fn pa_expr(expr: &Expr) -> String {
         Expr::Member { target, field } => format!("{}?['{}']", pa_expr(target), field),
         Expr::Literal(lit) => pa_literal(lit),
         Expr::BinaryOp { op, lhs, rhs } => {
+            // PA has no `notEquals`; synthesize it as `not(equals(...))`.
+            if let BinOp::NotEquals = op {
+                return format!("not(equals({}, {}))", pa_expr(lhs), pa_expr(rhs));
+            }
             let fn_name = match op {
                 BinOp::Concat => "concat",
                 BinOp::Add => "add",
                 BinOp::Sub => "sub",
                 BinOp::Mul => "mul",
                 BinOp::Div => "div",
+                BinOp::Less => "less",
+                BinOp::LessEq => "lessOrEquals",
+                BinOp::Greater => "greater",
+                BinOp::GreaterEq => "greaterOrEquals",
+                BinOp::Equals => "equals",
+                BinOp::NotEquals => unreachable!("handled above"),
             };
             format!("{}({}, {})", fn_name, pa_expr(lhs), pa_expr(rhs))
         }
@@ -297,6 +318,56 @@ var msg: string = "count: " & total + 1"#,
             v.as_str().unwrap(),
             "@{concat('count: ', add(variables('total'), 1))}"
         );
+    }
+
+    #[test]
+    fn slice16_comparison_ops_emit_pa_functions() {
+        let cases = [
+            ("<", "less"),
+            ("<=", "lessOrEquals"),
+            (">", "greater"),
+            (">=", "greaterOrEquals"),
+            ("==", "equals"),
+        ];
+        for (op, fn_name) in cases {
+            let src = format!("var a: int = 5\nlet check = a {op} 10");
+            let out = compile(&src);
+            let v = &out["definition"]["actions"]["Compose_check"]["inputs"];
+            let expected = format!("@{{{}(variables('a'), 10)}}", fn_name);
+            assert_eq!(v.as_str().unwrap(), expected, "op: {op}");
+        }
+    }
+
+    #[test]
+    fn slice16_not_equals_synthesized_via_not() {
+        let out = compile("var a: int = 5\nlet check = a != 10");
+        let v = &out["definition"]["actions"]["Compose_check"]["inputs"];
+        assert_eq!(
+            v.as_str().unwrap(),
+            "@{not(equals(variables('a'), 10))}"
+        );
+    }
+
+    #[test]
+    fn slice16_condition_with_comparison_skips_autowrap() {
+        let out = compile(
+            r#"var a: int = 5
+if a > 0 {
+}"#,
+        );
+        let cond = &out["definition"]["actions"]["Condition"]["expression"];
+        assert_eq!(cond.as_str().unwrap(), "@greater(variables('a'), 0)");
+    }
+
+    #[test]
+    fn slice16_condition_with_bare_ref_still_autowraps() {
+        let out = compile(
+            r#"var ok: bool = true
+if ok {
+}"#,
+        );
+        let cond = &out["definition"]["actions"]["Condition"]["expression"];
+        assert_eq!(cond.as_str().unwrap(), "@equals(variables('ok'), true)");
     }
 
     #[test]
