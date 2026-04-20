@@ -1,39 +1,52 @@
-// Canonical v1 tour. Every built-in construct appears at least once.
+// Canonical v1 tour — every built-in construct appears at least once.
 
 trigger manual
 
+// InitializeVariable with all five v1 types.
 var total: int = 0
-var completed: int = 0
-var pending_titles: array = []
-
-let tasks: array = [
+var label: string = "pending"
+var flag: bool = true
+var results: object = {
+  "region": "us-east",
+  "retries": 3
+}
+var tasks: array = [
   { "title": "Buy groceries", "done": true  },
   { "title": "Write memo",    "done": false },
   { "title": "Call plumber",  "done": false },
 ]
+var pending_titles: array = []
 
+// Foreach with an iterator, object member access, mutation inside the body.
 foreach task in tasks {
   total += 1
-
   if task.done {
-    completed += 1
+    flag = true
   } else {
     pending_titles += task.title
+    label = "incomplete"
   }
 }
 
-let remaining: int = total - completed
-let summary: string = concat("Completed ", completed, " of ", total, " tasks.")
+// Compose (let) captures a value under an action output.
+let region = results.region
+let current_label = label
 
-// Raw-JSON escape hatch for any action pax doesn't model natively.
+// Raw JSON escape hatch for actions pax doesn't model natively.
+// PA expression strings reference variables, Compose outputs, etc.
 raw Send_reminder_email {
   "type": "Http",
   "inputs": {
     "method": "POST",
     "uri": "https://example.com/notify",
+    "headers": {
+      "Content-Type": "application/json"
+    },
     "body": {
-      "summary":  "@{variables('summary')}",
-      "pending":  "@{variables('pending_titles')}"
+      "region":  "@{outputs('Compose_region')}",
+      "label":   "@{outputs('Compose_current_label')}",
+      "pending": "@{variables('pending_titles')}",
+      "total":   "@{variables('total')}"
     }
   }
 }
