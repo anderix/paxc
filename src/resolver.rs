@@ -5,7 +5,7 @@
 //! (so the emitter can set `runAfter`), and detects duplicate declarations
 //! that would produce conflicting action keys.
 
-use crate::ast::{Program, Stmt};
+use crate::ast::{Expr, Program, Stmt};
 use std::collections::HashSet;
 use std::fmt;
 
@@ -24,6 +24,7 @@ pub struct ResolvedAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
     DuplicateVariable { name: String },
+    UndefinedVariable { name: String },
 }
 
 impl fmt::Display for ResolveError {
@@ -31,6 +32,9 @@ impl fmt::Display for ResolveError {
         match self {
             ResolveError::DuplicateVariable { name } => {
                 write!(f, "variable `{name}` declared more than once")
+            }
+            ResolveError::UndefinedVariable { name } => {
+                write!(f, "variable `{name}` is not defined")
             }
         }
     }
@@ -45,7 +49,8 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
 
     for stmt in &program.statements {
         match stmt {
-            Stmt::VarDecl { name, .. } => {
+            Stmt::VarDecl { name, value, .. } => {
+                validate_expr(value, &seen)?;
                 if !seen.insert(name.clone()) {
                     return Err(ResolveError::DuplicateVariable { name: name.clone() });
                 }
@@ -65,6 +70,19 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
     }
 
     Ok(ResolvedProgram { actions })
+}
+
+fn validate_expr(expr: &Expr, seen: &HashSet<String>) -> Result<(), ResolveError> {
+    match expr {
+        Expr::Literal(_) => Ok(()),
+        Expr::Ref(name) => {
+            if seen.contains(name) {
+                Ok(())
+            } else {
+                Err(ResolveError::UndefinedVariable { name: name.clone() })
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -103,6 +121,56 @@ mod tests {
         assert_eq!(
             resolve(&prog).unwrap_err(),
             ResolveError::DuplicateVariable {
+                name: "x".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_valid_reference() {
+        let ref_y = Stmt::VarDecl {
+            name: "y".to_string(),
+            ty: Type::Int,
+            value: Expr::Ref("x".to_string()),
+        };
+        let prog = Program {
+            statements: vec![var("x"), ref_y],
+        };
+        assert!(resolve(&prog).is_ok());
+    }
+
+    #[test]
+    fn rejects_undefined_reference() {
+        let ref_y = Stmt::VarDecl {
+            name: "y".to_string(),
+            ty: Type::Int,
+            value: Expr::Ref("nope".to_string()),
+        };
+        let prog = Program {
+            statements: vec![ref_y],
+        };
+        assert_eq!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::UndefinedVariable {
+                name: "nope".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_forward_reference() {
+        // y references x, but x is declared afterward.
+        let ref_y = Stmt::VarDecl {
+            name: "y".to_string(),
+            ty: Type::Int,
+            value: Expr::Ref("x".to_string()),
+        };
+        let prog = Program {
+            statements: vec![ref_y, var("x")],
+        };
+        assert_eq!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::UndefinedVariable {
                 name: "x".to_string()
             }
         );

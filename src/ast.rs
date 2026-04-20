@@ -30,6 +30,7 @@ pub enum Type {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Literal(Literal),
+    Ref(String),
 }
 
 #[derive(Debug, Clone)]

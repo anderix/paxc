@@ -1,0 +1,4 @@
+var original: string = "hello"
+var copy: string = original
+var count: int = 42
+var mirror: int = count

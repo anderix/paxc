@@ -51,6 +51,7 @@ fn emit_var_decl(name: &str, ty: &Type, value: &Expr) -> Value {
     };
     let value_json = match value {
         Expr::Literal(lit) => literal_to_json(lit),
+        Expr::Ref(var_name) => json!(format!("@{{variables('{var_name}')}}")),
     };
     json!({
         "type": "InitializeVariable",

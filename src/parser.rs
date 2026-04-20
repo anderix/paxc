@@ -47,15 +47,18 @@ where
             .map(Literal::Object);
 
         scalar.or(array).or(object)
-    })
-    .map(Expr::Literal);
+    });
+
+    let reference = select! { Token::Ident(s) => Expr::Ref(s.to_string()) };
+
+    let expr = literal.map(Expr::Literal).or(reference);
 
     let var_decl = just(Token::Var)
         .ignore_then(name)
         .then_ignore(just(Token::Colon))
         .then(ty)
         .then_ignore(just(Token::Eq))
-        .then(literal)
+        .then(expr)
         .map(|((name, ty), value)| Stmt::VarDecl {
             name: name.to_string(),
             ty,
