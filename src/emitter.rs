@@ -91,8 +91,19 @@ fn emit_mutation(action_type: &str, var: &str, value: &Expr) -> Value {
 fn expr_to_json(value: &Expr) -> Value {
     match value {
         Expr::Literal(lit) => literal_to_json(lit),
-        Expr::VarRef(name) => json!(format!("@{{variables('{name}')}}")),
-        Expr::ComposeRef(action_name) => json!(format!("@{{outputs('{action_name}')}}")),
+        _ => json!(format!("@{{{}}}", pa_expr(value))),
+    }
+}
+
+/// Builds the inner text of a PA expression (everything that goes inside `@{...}`).
+fn pa_expr(expr: &Expr) -> String {
+    match expr {
+        Expr::VarRef(name) => format!("variables('{name}')"),
+        Expr::ComposeRef(action_name) => format!("outputs('{action_name}')"),
+        Expr::Member { target, field } => format!("{}?['{}']", pa_expr(target), field),
+        Expr::Literal(_) => {
+            unreachable!("literals are handled at the value-slot level, not inside expressions")
+        }
         Expr::Ref(_) => {
             unreachable!("resolver should have rewritten Expr::Ref before emit")
         }

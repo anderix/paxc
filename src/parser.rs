@@ -62,7 +62,14 @@ where
 
     let reference = select! { Token::Ident(s) => Expr::Ref(s.to_string()) };
 
-    let expr = literal.clone().map(Expr::Literal).or(reference);
+    let field = just(Token::Dot).ignore_then(select! { Token::Ident(s) => s.to_string() });
+
+    let ref_path = reference.foldl(field.repeated(), |target, field| Expr::Member {
+        target: Box::new(target),
+        field,
+    });
+
+    let expr = literal.clone().map(Expr::Literal).or(ref_path);
 
     let var_decl = just(Token::Var)
         .ignore_then(name)

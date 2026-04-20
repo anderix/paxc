@@ -1,0 +1,15 @@
+trigger manual
+
+var config: object = {
+  "region": "us-east",
+  "retries": 3,
+  "endpoints": {
+    "primary": "https://a.example.com",
+    "fallback": "https://b.example.com"
+  }
+}
+
+let region = config.region
+let primary = config.endpoints.primary
+
+var announcement: string = config.endpoints.fallback

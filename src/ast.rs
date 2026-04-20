@@ -64,6 +64,11 @@ pub enum Expr {
     /// Reference to a `let` binding. The payload is the Compose action key
     /// the resolver assigned to it. Emits `@{outputs('Compose_x')}`.
     ComposeRef(String),
+    /// Member access `target.field`. Chains via nested Member nodes.
+    Member {
+        target: Box<Expr>,
+        field: String,
+    },
 }
 
 #[derive(Debug, Clone)]

@@ -276,6 +276,13 @@ fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, Res
             Some(Binding::Let { action_name }) => Ok(Expr::ComposeRef(action_name.clone())),
             None => Err(ResolveError::UndefinedVariable { name: name.clone() }),
         },
+        Expr::Member { target, field } => {
+            let resolved_target = resolve_expr(target, env)?;
+            Ok(Expr::Member {
+                target: Box::new(resolved_target),
+                field: field.clone(),
+            })
+        }
         Expr::VarRef(_) | Expr::ComposeRef(_) => Ok(expr.clone()),
     }
 }
