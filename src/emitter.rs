@@ -501,6 +501,74 @@ if empty(items) {
     }
 
     #[test]
+    fn v1_1_bool_literals_inside_expressions() {
+        let out = compile("var flag: bool = true\nlet x = flag == true");
+        let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
+        assert_eq!(v.as_str().unwrap(), "@{equals(variables('flag'), true)}");
+
+        let out = compile("var flag: bool = true\nlet y = flag == false");
+        let v = &out["definition"]["actions"]["Compose_y"]["inputs"];
+        assert_eq!(v.as_str().unwrap(), "@{equals(variables('flag'), false)}");
+    }
+
+    #[test]
+    fn v1_1_null_literal_inside_expression() {
+        let out = compile("var results: object = {}\nlet z = results == null");
+        let v = &out["definition"]["actions"]["Compose_z"]["inputs"];
+        assert_eq!(v.as_str().unwrap(), "@{equals(variables('results'), null)}");
+    }
+
+    #[test]
+    fn v1_1_chained_unary_not() {
+        let out = compile("var a: bool = true\nlet x = !!a");
+        let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
+        assert_eq!(v.as_str().unwrap(), "@{not(not(variables('a')))}");
+    }
+
+    #[test]
+    fn v1_1_chained_unary_neg() {
+        let out = compile("var n: int = 5\nlet y = --n");
+        let v = &out["definition"]["actions"]["Compose_y"]["inputs"];
+        assert_eq!(v.as_str().unwrap(), "@{sub(0, sub(0, variables('n')))}");
+    }
+
+    #[test]
+    fn v1_1_concat_with_literal_on_left() {
+        let out = compile(r#"var name: string = "world"
+let greeting = "hello " & name"#);
+        let v = &out["definition"]["actions"]["Compose_greeting"]["inputs"];
+        assert_eq!(v.as_str().unwrap(), "@{concat('hello ', variables('name'))}");
+    }
+
+    #[test]
+    fn v1_1_not_equals_nested_in_logical_and() {
+        let out = compile(
+            r#"var a: int = 1
+var b: int = 2
+let x = a != b && a > 0"#,
+        );
+        let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
+        assert_eq!(
+            v.as_str().unwrap(),
+            "@{and(not(equals(variables('a'), variables('b'))), greater(variables('a'), 0))}"
+        );
+    }
+
+    #[test]
+    fn v1_1_not_equals_nested_in_logical_or() {
+        let out = compile(
+            r#"var a: int = 1
+var b: int = 2
+let x = a != b || a == 0"#,
+        );
+        let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
+        assert_eq!(
+            v.as_str().unwrap(),
+            "@{or(not(equals(variables('a'), variables('b'))), equals(variables('a'), 0))}"
+        );
+    }
+
+    #[test]
     fn slice14_concat_emits_concat_function() {
         let out = compile(
             r#"var greeting: string = "hello"
