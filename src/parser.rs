@@ -3,7 +3,7 @@
 //! Slice 1 recognizes a sequence of `var <ident>: <type> = <literal>`
 //! declarations and builds a `Program` AST.
 
-use crate::ast::{AssignOp, Expr, Literal, Program, Stmt, Type};
+use crate::ast::{AssignOp, Expr, Literal, Program, Stmt, Trigger, Type};
 use crate::lexer::{Span, Token};
 use chumsky::{input::ValueInput, prelude::*};
 
@@ -82,9 +82,16 @@ where
 
     let stmt = var_decl.or(assign);
 
-    stmt.repeated()
-        .collect::<Vec<_>>()
-        .map(|statements| Program { statements })
+    let trigger = just(Token::Trigger).ignore_then(select! {
+        Token::Ident("manual") => Trigger::Manual,
+    });
+
+    trigger
+        .then(stmt.repeated().collect::<Vec<_>>())
+        .map(|(trigger, statements)| Program {
+            trigger,
+            statements,
+        })
 }
 
 #[cfg(test)]
@@ -93,7 +100,10 @@ mod tests {
     use crate::lexer::lexer;
 
     fn parse(src: &str) -> Program {
-        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        // Prepend a manual trigger so slice-specific tests can focus on their
+        // new syntax without every test having to repeat the trigger line.
+        let src = format!("trigger manual\n{src}");
+        let tokens = lexer().parse(src.as_str()).into_result().expect("lex failed");
         parser()
             .parse(
                 tokens

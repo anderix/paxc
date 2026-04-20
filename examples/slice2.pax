@@ -1,3 +1,5 @@
+trigger manual
+
 var counter: int = 1
 var greeting: string = "hello"
 var active: bool = true

@@ -5,7 +5,7 @@
 //! an `actions` map. Action keys and `runAfter` predecessors come from the
 //! resolver, so this layer is purely a tree-to-JSON translation.
 
-use crate::ast::{Expr, Literal, Type};
+use crate::ast::{Expr, Literal, Trigger, Type};
 use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram};
 use serde_json::{Map, Value, json};
 
@@ -22,16 +22,22 @@ pub fn emit(program: &ResolvedProgram) -> Value {
         "definition": {
             "$schema": SCHEMA_URL,
             "contentVersion": "1.0.0.0",
-            "triggers": {
-                "manual": {
-                    "type": "Request",
-                    "kind": "Button",
-                    "inputs": {}
-                }
-            },
+            "triggers": emit_trigger(&program.trigger),
             "actions": Value::Object(actions),
         }
     })
+}
+
+fn emit_trigger(trigger: &Trigger) -> Value {
+    match trigger {
+        Trigger::Manual => json!({
+            "manual": {
+                "type": "Request",
+                "kind": "Button",
+                "inputs": {}
+            }
+        }),
+    }
 }
 
 fn emit_action(action: &ResolvedAction) -> Value {
@@ -127,7 +133,8 @@ mod tests {
     use chumsky::prelude::*;
 
     fn compile(src: &str) -> Value {
-        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        let src = format!("trigger manual\n{src}");
+        let tokens = lexer().parse(src.as_str()).into_result().expect("lex failed");
         let program = parser()
             .parse(
                 tokens

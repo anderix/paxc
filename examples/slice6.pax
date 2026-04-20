@@ -1,3 +1,5 @@
+trigger manual
+
 var counter: int = 0
 var message: string = "hello"
 var tags: array = []

@@ -6,7 +6,13 @@
 
 #[derive(Debug, Clone)]
 pub struct Program {
+    pub trigger: Trigger,
     pub statements: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Trigger {
+    Manual,
 }
 
 #[derive(Debug, Clone)]

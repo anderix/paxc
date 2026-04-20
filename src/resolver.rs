@@ -6,12 +6,13 @@
 //! tracks variable types in an environment, and lowers each AST statement
 //! into a concrete `ActionKind` the emitter can render directly.
 
-use crate::ast::{AssignOp, Expr, Program, Stmt, Type};
+use crate::ast::{AssignOp, Expr, Program, Stmt, Trigger, Type};
 use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedProgram {
+    pub trigger: Trigger,
     pub actions: Vec<ResolvedAction>,
 }
 
@@ -140,7 +141,10 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         });
     }
 
-    Ok(ResolvedProgram { actions })
+    Ok(ResolvedProgram {
+        trigger: program.trigger.clone(),
+        actions,
+    })
 }
 
 fn lower_assign(
@@ -228,7 +232,7 @@ fn validate_expr(expr: &Expr, env: &HashMap<String, Type>) -> Result<(), Resolve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Literal, Type};
+    use crate::ast::{Literal, Trigger, Type};
 
     fn var(name: &str) -> Stmt {
         Stmt::VarDecl {
@@ -257,6 +261,7 @@ mod tests {
     #[test]
     fn chains_in_source_order() {
         let prog = Program {
+            trigger: Trigger::Manual,
             statements: vec![var("a"), var("b"), var("c")],
         };
         let resolved = resolve(&prog).expect("resolve should succeed");
@@ -272,6 +277,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_variable() {
         let prog = Program {
+            trigger: Trigger::Manual,
             statements: vec![var("x"), var("x")],
         };
         assert_eq!(
@@ -290,6 +296,7 @@ mod tests {
             value: Expr::Ref("x".to_string()),
         };
         let prog = Program {
+            trigger: Trigger::Manual,
             statements: vec![var("x"), ref_y],
         };
         assert!(resolve(&prog).is_ok());
@@ -303,6 +310,7 @@ mod tests {
             value: Expr::Ref("nope".to_string()),
         };
         let prog = Program {
+            trigger: Trigger::Manual,
             statements: vec![ref_y],
         };
         assert_eq!(
@@ -321,6 +329,7 @@ mod tests {
             value: Expr::Ref("x".to_string()),
         };
         let prog = Program {
+            trigger: Trigger::Manual,
             statements: vec![ref_y, var("x")],
         };
         assert_eq!(
@@ -334,6 +343,7 @@ mod tests {
     #[test]
     fn set_on_any_type() {
         let prog = Program {
+            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("x", Type::Bool),
                 assign("x", AssignOp::Set, Expr::Literal(Literal::Bool(true))),
@@ -356,6 +366,7 @@ mod tests {
         ];
         for (ty, expected_name) in cases {
             let prog = Program {
+                trigger: Trigger::Manual,
                 statements: vec![
                     var_ty("x", ty.clone()),
                     assign("x", AssignOp::Add, Expr::Literal(Literal::Int(1))),
@@ -370,6 +381,7 @@ mod tests {
     fn add_rejects_bool_and_object() {
         for ty in [Type::Bool, Type::Object] {
             let prog = Program {
+                trigger: Trigger::Manual,
                 statements: vec![
                     var_ty("x", ty.clone()),
                     assign("x", AssignOp::Add, Expr::Literal(Literal::Int(1))),
@@ -385,6 +397,7 @@ mod tests {
     #[test]
     fn subtract_only_on_int() {
         let prog = Program {
+            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("x", Type::String),
                 assign("x", AssignOp::Subtract, Expr::Literal(Literal::Int(1))),
@@ -399,6 +412,7 @@ mod tests {
     #[test]
     fn assign_to_undefined_is_error() {
         let prog = Program {
+            trigger: Trigger::Manual,
             statements: vec![assign("nope", AssignOp::Set, Expr::Literal(Literal::Int(1)))],
         };
         assert_eq!(
@@ -412,6 +426,7 @@ mod tests {
     #[test]
     fn auto_suffix_follows_zero_indexed_convention() {
         let prog = Program {
+            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("x", Type::Int),
                 assign("x", AssignOp::Add, Expr::Literal(Literal::Int(1))),
