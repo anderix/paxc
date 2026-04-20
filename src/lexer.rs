@@ -22,7 +22,7 @@ pub enum Token<'src> {
     Null,
     Ident(&'src str),
     Int(i64),
-    Str(&'src str),
+    Str(String),
     Bool(bool),
     Colon,
     Eq,
@@ -44,8 +44,18 @@ pub fn lexer<'src>()
         .unwrapped()
         .map(Token::Int);
 
+    let escape = just('\\').ignore_then(choice((
+        just('n').to('\n'),
+        just('t').to('\t'),
+        just('r').to('\r'),
+        just('"').to('"'),
+        just('\\').to('\\'),
+    )));
+
+    let str_char = escape.or(none_of("\\\""));
+
     let str_ = just('"')
-        .ignore_then(none_of('"').repeated().to_slice())
+        .ignore_then(str_char.repeated().collect::<String>())
         .then_ignore(just('"'))
         .map(Token::Str);
 
@@ -133,7 +143,7 @@ mod tests {
                 Token::Colon,
                 Token::Ident("string"),
                 Token::Eq,
-                Token::Str("hello"),
+                Token::Str("hello".to_string()),
             ]
         );
         assert_eq!(
@@ -166,6 +176,14 @@ mod tests {
                 Token::MinusEq,
                 Token::Int(1),
             ]
+        );
+    }
+
+    #[test]
+    fn slice13_string_escapes() {
+        assert_eq!(
+            lex(r#""a\nb\tc\"d\\e\re""#),
+            vec![Token::Str("a\nb\tc\"d\\e\re".to_string())]
         );
     }
 

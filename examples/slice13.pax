@@ -1,0 +1,6 @@
+trigger manual
+
+var multiline: string = "line one\nline two"
+var tabbed: string = "col1\tcol2"
+var quoted: string = "she said \"hi\""
+var windows_path: string = "C:\\Users\\david"

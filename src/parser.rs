@@ -26,7 +26,7 @@ where
         let scalar = select! {
             Token::Null => Literal::Null,
             Token::Int(n) => Literal::Int(n),
-            Token::Str(s) => Literal::String(s.to_string()),
+            Token::Str(s) => Literal::String(s),
             Token::Bool(b) => Literal::Bool(b),
         };
 
@@ -38,7 +38,7 @@ where
             .delimited_by(just(Token::LBracket), just(Token::RBracket))
             .map(Literal::Array);
 
-        let key = select! { Token::Str(s) => s.to_string() };
+        let key = select! { Token::Str(s) => s };
         let entry = key.then_ignore(just(Token::Colon)).then(literal.clone());
         let object = entry
             .separated_by(just(Token::Comma))
@@ -51,7 +51,7 @@ where
     });
 
     let object_entries = {
-        let key = select! { Token::Str(s) => s.to_string() };
+        let key = select! { Token::Str(s) => s };
         let entry = key.then_ignore(just(Token::Colon)).then(literal.clone());
         entry
             .separated_by(just(Token::Comma))
