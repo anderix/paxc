@@ -84,7 +84,7 @@ where
 
     let assign = name
         .then(assign_op)
-        .then(expr)
+        .then(expr.clone())
         .map(|((name, op), value)| Stmt::Assign {
             name: name.to_string(),
             op,
@@ -96,7 +96,16 @@ where
         .then(object_entries)
         .map(|(name, body)| Stmt::Raw { name, body });
 
-    let stmt = var_decl.or(raw_stmt).or(assign);
+    let let_decl = just(Token::Let)
+        .ignore_then(name)
+        .then_ignore(just(Token::Eq))
+        .then(expr.clone())
+        .map(|(name, value)| Stmt::Let {
+            name: name.to_string(),
+            value,
+        });
+
+    let stmt = var_decl.or(let_decl).or(raw_stmt).or(assign);
 
     let trigger = just(Token::Trigger).ignore_then(select! {
         Token::Ident("manual") => Trigger::Manual,

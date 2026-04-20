@@ -12,6 +12,7 @@ pub type Spanned<T> = (T, Span);
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token<'src> {
     Var,
+    Let,
     Trigger,
     Raw,
     Null,
@@ -60,6 +61,7 @@ pub fn lexer<'src>()
 
     let ident = text::ascii::ident().map(|s: &str| match s {
         "var" => Token::Var,
+        "let" => Token::Let,
         "trigger" => Token::Trigger,
         "raw" => Token::Raw,
         "null" => Token::Null,

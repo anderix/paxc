@@ -1,0 +1,8 @@
+trigger manual
+
+var counter: int = 10
+
+let snapshot = counter
+let label = "run complete"
+
+var reported: string = label

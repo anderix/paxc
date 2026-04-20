@@ -56,9 +56,17 @@ fn emit_action(action: &ResolvedAction) -> Value {
         ActionKind::AppendToArrayVariable { var, value } => {
             emit_mutation("AppendToArrayVariable", var, value)
         }
+        ActionKind::Compose { value } => emit_compose(value),
         ActionKind::Raw { body } => emit_raw(body),
     };
     splice_run_after(body, &action.run_after)
+}
+
+fn emit_compose(value: &Expr) -> Value {
+    json!({
+        "type": "Compose",
+        "inputs": expr_to_json(value),
+    })
 }
 
 fn emit_raw(body: &[(String, Literal)]) -> Value {
@@ -83,7 +91,11 @@ fn emit_mutation(action_type: &str, var: &str, value: &Expr) -> Value {
 fn expr_to_json(value: &Expr) -> Value {
     match value {
         Expr::Literal(lit) => literal_to_json(lit),
-        Expr::Ref(var_name) => json!(format!("@{{variables('{var_name}')}}")),
+        Expr::VarRef(name) => json!(format!("@{{variables('{name}')}}")),
+        Expr::ComposeRef(action_name) => json!(format!("@{{outputs('{action_name}')}}")),
+        Expr::Ref(_) => {
+            unreachable!("resolver should have rewritten Expr::Ref before emit")
+        }
     }
 }
 

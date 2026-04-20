@@ -3,8 +3,13 @@
 //! The resolver is the pass between parser and emitter. It assigns each
 //! statement a Power Automate action key (uniqued by suffix when needed),
 //! links actions by source order (so the emitter can set `runAfter`),
-//! tracks variable types in an environment, and lowers each AST statement
+//! tracks each binding in an environment, and lowers each AST statement
 //! into a concrete `ActionKind` the emitter can render directly.
+//!
+//! Expression resolution happens here: every `Expr::Ref(name)` emitted by
+//! the parser is rewritten to either `Expr::VarRef` (pointing at a pax
+//! variable) or `Expr::ComposeRef` (pointing at a `let` binding's Compose
+//! action key), so the emitter never sees an unresolved reference.
 
 use crate::ast::{AssignOp, Expr, Literal, Program, Stmt, Trigger, Type};
 use std::collections::HashMap;
@@ -50,9 +55,18 @@ pub enum ActionKind {
         var: String,
         value: Expr,
     },
+    Compose {
+        value: Expr,
+    },
     Raw {
         body: Vec<(String, Literal)>,
     },
+}
+
+#[derive(Debug, Clone)]
+enum Binding {
+    Var { ty: Type },
+    Let { action_name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,16 +74,17 @@ pub enum ResolveError {
     DuplicateVariable { name: String },
     UndefinedVariable { name: String },
     InvalidOperation { op: AssignOp, name: String, ty: Type },
+    CannotAssignToImmutable { name: String },
 }
 
 impl fmt::Display for ResolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ResolveError::DuplicateVariable { name } => {
-                write!(f, "variable `{name}` declared more than once")
+                write!(f, "`{name}` is already declared")
             }
             ResolveError::UndefinedVariable { name } => {
-                write!(f, "variable `{name}` is not defined")
+                write!(f, "`{name}` is not defined")
             }
             ResolveError::InvalidOperation { op, name, ty } => {
                 let op_str = match op {
@@ -81,6 +96,12 @@ impl fmt::Display for ResolveError {
                 write!(
                     f,
                     "cannot apply `{op_str}` to variable `{name}` of type `{ty_str}`"
+                )
+            }
+            ResolveError::CannotAssignToImmutable { name } => {
+                write!(
+                    f,
+                    "cannot assign to `{name}`: `let` bindings are immutable"
                 )
             }
         }
@@ -101,43 +122,65 @@ fn type_name(ty: &Type) -> &'static str {
 
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
     let mut actions: Vec<ResolvedAction> = Vec::with_capacity(program.statements.len());
-    let mut env: HashMap<String, Type> = HashMap::new();
+    let mut env: HashMap<String, Binding> = HashMap::new();
     let mut name_counts: HashMap<String, u32> = HashMap::new();
     let mut prev_name: Option<String> = None;
 
     for stmt in &program.statements {
-        let (base_name, kind) = match stmt {
+        let (action_name, kind) = match stmt {
             Stmt::VarDecl { name, ty, value } => {
-                validate_expr(value, &env)?;
+                let value = resolve_expr(value, &env)?;
                 if env.contains_key(name) {
                     return Err(ResolveError::DuplicateVariable { name: name.clone() });
                 }
-                env.insert(name.clone(), ty.clone());
-                let base = format!("Initialize_{name}");
+                env.insert(name.clone(), Binding::Var { ty: ty.clone() });
+                let action_name =
+                    unique_name(&format!("Initialize_{name}"), &mut name_counts);
                 let kind = ActionKind::InitializeVariable {
                     var: name.clone(),
                     ty: ty.clone(),
-                    value: value.clone(),
+                    value,
                 };
-                (base, kind)
+                (action_name, kind)
+            }
+            Stmt::Let { name, value } => {
+                let value = resolve_expr(value, &env)?;
+                if env.contains_key(name) {
+                    return Err(ResolveError::DuplicateVariable { name: name.clone() });
+                }
+                let action_name = unique_name(&format!("Compose_{name}"), &mut name_counts);
+                env.insert(
+                    name.clone(),
+                    Binding::Let {
+                        action_name: action_name.clone(),
+                    },
+                );
+                (action_name, ActionKind::Compose { value })
             }
             Stmt::Assign { name, op, value } => {
-                validate_expr(value, &env)?;
-                let ty = env
-                    .get(name)
-                    .ok_or_else(|| ResolveError::UndefinedVariable { name: name.clone() })?
-                    .clone();
-                lower_assign(name, *op, &ty, value.clone())?
+                let value = resolve_expr(value, &env)?;
+                match env.get(name) {
+                    Some(Binding::Var { ty }) => {
+                        let ty = ty.clone();
+                        let (base, kind) = lower_assign(name, *op, &ty, value)?;
+                        (unique_name(&base, &mut name_counts), kind)
+                    }
+                    Some(Binding::Let { .. }) => {
+                        return Err(ResolveError::CannotAssignToImmutable {
+                            name: name.clone(),
+                        });
+                    }
+                    None => {
+                        return Err(ResolveError::UndefinedVariable { name: name.clone() });
+                    }
+                }
             }
-            Stmt::Raw { name, body } => (
-                name.clone(),
-                ActionKind::Raw {
-                    body: body.clone(),
-                },
-            ),
+            Stmt::Raw { name, body } => {
+                let action_name = unique_name(name, &mut name_counts);
+                (action_name, ActionKind::Raw { body: body.clone() })
+            }
         };
 
-        let action_name = unique_name(&base_name, &mut name_counts);
         let run_after = match &prev_name {
             Some(n) => vec![n.clone()],
             None => Vec::new(),
@@ -225,16 +268,15 @@ fn unique_name(base: &str, counts: &mut HashMap<String, u32>) -> String {
     name
 }
 
-fn validate_expr(expr: &Expr, env: &HashMap<String, Type>) -> Result<(), ResolveError> {
+fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, ResolveError> {
     match expr {
-        Expr::Literal(_) => Ok(()),
-        Expr::Ref(name) => {
-            if env.contains_key(name) {
-                Ok(())
-            } else {
-                Err(ResolveError::UndefinedVariable { name: name.clone() })
-            }
-        }
+        Expr::Literal(l) => Ok(Expr::Literal(l.clone())),
+        Expr::Ref(name) => match env.get(name) {
+            Some(Binding::Var { .. }) => Ok(Expr::VarRef(name.clone())),
+            Some(Binding::Let { action_name }) => Ok(Expr::ComposeRef(action_name.clone())),
+            None => Err(ResolveError::UndefinedVariable { name: name.clone() }),
+        },
+        Expr::VarRef(_) | Expr::ComposeRef(_) => Ok(expr.clone()),
     }
 }
 
@@ -263,6 +305,13 @@ mod tests {
         Stmt::Assign {
             name: name.to_string(),
             op,
+            value,
+        }
+    }
+
+    fn let_stmt(name: &str, value: Expr) -> Stmt {
+        Stmt::Let {
+            name: name.to_string(),
             value,
         }
     }
@@ -447,5 +496,73 @@ mod tests {
         assert_eq!(resolved.actions[1].name, "Increment_x");
         assert_eq!(resolved.actions[2].name, "Increment_x_1");
         assert_eq!(resolved.actions[3].name, "Increment_x_2");
+    }
+
+    #[test]
+    fn let_becomes_compose_action() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![let_stmt("doubled", Expr::Literal(Literal::Int(42)))],
+        };
+        let resolved = resolve(&prog).unwrap();
+        assert_eq!(resolved.actions[0].name, "Compose_doubled");
+        assert!(matches!(resolved.actions[0].kind, ActionKind::Compose { .. }));
+    }
+
+    #[test]
+    fn let_is_referenced_as_compose_output() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                let_stmt("total", Expr::Literal(Literal::Int(10))),
+                Stmt::VarDecl {
+                    name: "mirror".to_string(),
+                    ty: Type::Int,
+                    value: Expr::Ref("total".to_string()),
+                },
+            ],
+        };
+        let resolved = resolve(&prog).unwrap();
+        let var_action = &resolved.actions[1];
+        match &var_action.kind {
+            ActionKind::InitializeVariable { value, .. } => {
+                assert!(matches!(value, Expr::ComposeRef(s) if s == "Compose_total"));
+            }
+            _ => panic!("expected InitializeVariable"),
+        }
+    }
+
+    #[test]
+    fn cannot_assign_to_let() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                let_stmt("immut", Expr::Literal(Literal::Int(1))),
+                assign("immut", AssignOp::Set, Expr::Literal(Literal::Int(2))),
+            ],
+        };
+        assert_eq!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::CannotAssignToImmutable {
+                name: "immut".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn var_and_let_share_namespace() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var("x"),
+                let_stmt("x", Expr::Literal(Literal::Int(1))),
+            ],
+        };
+        assert_eq!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::DuplicateVariable {
+                name: "x".to_string()
+            }
+        );
     }
 }

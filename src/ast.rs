@@ -31,6 +31,10 @@ pub enum Stmt {
         name: String,
         body: Vec<(String, Literal)>,
     },
+    Let {
+        name: String,
+        value: Expr,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +56,14 @@ pub enum Type {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Literal(Literal),
+    /// Unresolved identifier reference emitted by the parser. The resolver
+    /// rewrites each occurrence into either `VarRef` or `ComposeRef`.
     Ref(String),
+    /// Reference to a pax variable. Emits `@{variables('x')}`.
+    VarRef(String),
+    /// Reference to a `let` binding. The payload is the Compose action key
+    /// the resolver assigned to it. Emits `@{outputs('Compose_x')}`.
+    ComposeRef(String),
 }
 
 #[derive(Debug, Clone)]
