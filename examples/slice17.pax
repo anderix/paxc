@@ -1,0 +1,21 @@
+trigger manual
+
+var total: int = 10
+var completed: int = 7
+var flag: bool = true
+
+// Unary not and logical and in a condition
+if !flag && completed > 0 {
+  flag = true
+}
+
+// Logical or
+if completed == 0 || total == completed {
+  flag = false
+}
+
+// Unary negation
+let deficit = -completed
+
+// Precedence: && binds tighter than ||
+let pass = completed > 0 || total == 0 && flag

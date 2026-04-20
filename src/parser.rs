@@ -3,7 +3,7 @@
 //! Slice 1 recognizes a sequence of `var <ident>: <type> = <literal>`
 //! declarations and builds a `Program` AST.
 
-use crate::ast::{AssignOp, BinOp, Expr, Literal, Program, Stmt, Trigger, Type};
+use crate::ast::{AssignOp, BinOp, Expr, Literal, Program, Stmt, Trigger, Type, UnaryOp};
 use crate::lexer::{Span, Token};
 use chumsky::{input::ValueInput, prelude::*};
 
@@ -71,9 +71,27 @@ where
 
     let atom = literal.clone().map(Expr::Literal).or(ref_path).boxed();
 
-    // Precedence, tightest to loosest: atom → product (*, /) → sum (+, -) → concat (&).
+    // Precedence, tightest to loosest:
+    //   atom → unary (!, -) → product (*, /) → sum (+, -) → concat (&)
+    //     → comparison (< <= > >= == !=, non-chaining) → and (&&) → or (||)
     // All binary operators are left-associative. `.boxed()` at each layer keeps
     // chumsky's generic type chain from growing exponentially across layers.
+
+    let unary_op = select! {
+        Token::Bang => UnaryOp::Not,
+        Token::Minus => UnaryOp::Neg,
+    };
+
+    let unary = recursive(|unary| {
+        unary_op
+            .then(unary)
+            .map(|(op, operand)| Expr::UnaryOp {
+                op,
+                operand: Box::new(operand),
+            })
+            .or(atom.clone())
+    })
+    .boxed();
     let mul_op = select! {
         Token::Star => BinOp::Mul,
         Token::Slash => BinOp::Div,
@@ -86,9 +104,9 @@ where
         Token::Amp => BinOp::Concat,
     };
 
-    let product = atom
+    let product = unary
         .clone()
-        .foldl(mul_op.then(atom).repeated(), |lhs, (op, rhs)| {
+        .foldl(mul_op.then(unary).repeated(), |lhs, (op, rhs)| {
             Expr::BinaryOp {
                 op,
                 lhs: Box::new(lhs),
@@ -129,7 +147,7 @@ where
         Token::BangEq => BinOp::NotEquals,
     };
 
-    let expr = concat
+    let comparison = concat
         .clone()
         .then(comp_op.then(concat).or_not())
         .map(|(lhs, tail)| match tail {
@@ -139,6 +157,31 @@ where
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
             },
+        })
+        .boxed();
+
+    let and_op = select! { Token::AmpAmp => BinOp::And };
+    let or_op = select! { Token::PipePipe => BinOp::Or };
+
+    let and_layer = comparison
+        .clone()
+        .foldl(and_op.then(comparison).repeated(), |lhs, (op, rhs)| {
+            Expr::BinaryOp {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            }
+        })
+        .boxed();
+
+    let expr = and_layer
+        .clone()
+        .foldl(or_op.then(and_layer).repeated(), |lhs, (op, rhs)| {
+            Expr::BinaryOp {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            }
         })
         .boxed();
 

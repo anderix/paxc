@@ -5,7 +5,7 @@
 //! an `actions` map. Action keys and `runAfter` predecessors come from the
 //! resolver, so this layer is purely a tree-to-JSON translation.
 
-use crate::ast::{BinOp, Expr, Literal, Trigger, Type};
+use crate::ast::{BinOp, Expr, Literal, Trigger, Type, UnaryOp};
 use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram};
 use serde_json::{Map, Value, json};
 
@@ -103,7 +103,11 @@ fn emit_condition(
 }
 
 fn is_boolean_expr(expr: &Expr) -> bool {
-    matches!(expr, Expr::BinaryOp { op, .. } if op.is_boolean())
+    match expr {
+        Expr::BinaryOp { op, .. } => op.is_boolean(),
+        Expr::UnaryOp { op: UnaryOp::Not, .. } => true,
+        _ => false,
+    }
 }
 
 fn emit_compose(value: &Expr) -> Value {
@@ -163,10 +167,17 @@ fn pa_expr(expr: &Expr) -> String {
                 BinOp::Greater => "greater",
                 BinOp::GreaterEq => "greaterOrEquals",
                 BinOp::Equals => "equals",
+                BinOp::And => "and",
+                BinOp::Or => "or",
                 BinOp::NotEquals => unreachable!("handled above"),
             };
             format!("{}({}, {})", fn_name, pa_expr(lhs), pa_expr(rhs))
         }
+        Expr::UnaryOp { op, operand } => match op {
+            UnaryOp::Not => format!("not({})", pa_expr(operand)),
+            // PA has no unary minus; synthesize via sub(0, operand).
+            UnaryOp::Neg => format!("sub(0, {})", pa_expr(operand)),
+        },
         Expr::Ref(_) => {
             unreachable!("resolver should have rewritten Expr::Ref before emit")
         }
@@ -368,6 +379,72 @@ if ok {
         );
         let cond = &out["definition"]["actions"]["Condition"]["expression"];
         assert_eq!(cond.as_str().unwrap(), "@equals(variables('ok'), true)");
+    }
+
+    #[test]
+    fn slice17_logical_and_or_emit_pa_functions() {
+        let out = compile("var a: bool = true\nvar b: bool = false\nlet c = a && b");
+        let v = &out["definition"]["actions"]["Compose_c"]["inputs"];
+        assert_eq!(v.as_str().unwrap(), "@{and(variables('a'), variables('b'))}");
+
+        let out = compile("var a: bool = true\nvar b: bool = false\nlet c = a || b");
+        let v = &out["definition"]["actions"]["Compose_c"]["inputs"];
+        assert_eq!(v.as_str().unwrap(), "@{or(variables('a'), variables('b'))}");
+    }
+
+    #[test]
+    fn slice17_logical_precedence_and_tighter_than_or() {
+        let out = compile(
+            r#"var a: bool = true
+var b: bool = true
+var c: bool = true
+let x = a || b && c"#,
+        );
+        let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
+        assert_eq!(
+            v.as_str().unwrap(),
+            "@{or(variables('a'), and(variables('b'), variables('c')))}"
+        );
+    }
+
+    #[test]
+    fn slice17_unary_not_emits_not() {
+        let out = compile("var a: bool = true\nlet x = !a");
+        let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
+        assert_eq!(v.as_str().unwrap(), "@{not(variables('a'))}");
+    }
+
+    #[test]
+    fn slice17_unary_neg_emits_sub_from_zero() {
+        let out = compile("var a: int = 5\nlet x = -a");
+        let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
+        assert_eq!(v.as_str().unwrap(), "@{sub(0, variables('a'))}");
+    }
+
+    #[test]
+    fn slice17_condition_with_logical_skips_autowrap() {
+        let out = compile(
+            r#"var a: int = 5
+var b: int = 3
+if a > 0 && b > 0 {
+}"#,
+        );
+        let cond = &out["definition"]["actions"]["Condition"]["expression"];
+        assert_eq!(
+            cond.as_str().unwrap(),
+            "@and(greater(variables('a'), 0), greater(variables('b'), 0))"
+        );
+    }
+
+    #[test]
+    fn slice17_condition_with_not_skips_autowrap() {
+        let out = compile(
+            r#"var ok: bool = true
+if !ok {
+}"#,
+        );
+        let cond = &out["definition"]["actions"]["Condition"]["expression"];
+        assert_eq!(cond.as_str().unwrap(), "@not(variables('ok'))");
     }
 
     #[test]

@@ -370,6 +370,13 @@ fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, Res
                 rhs: Box::new(rhs),
             })
         }
+        Expr::UnaryOp { op, operand } => {
+            let operand = resolve_expr(operand, env)?;
+            Ok(Expr::UnaryOp {
+                op: *op,
+                operand: Box::new(operand),
+            })
+        }
     }
 }
 

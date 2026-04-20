@@ -68,10 +68,12 @@ pub enum BinOp {
     GreaterEq,
     Equals,
     NotEquals,
+    And,
+    Or,
 }
 
 impl BinOp {
-    /// True when this operator's result is a boolean (comparison ops).
+    /// True when this operator's result is a boolean (comparisons + logical).
     pub fn is_boolean(self) -> bool {
         matches!(
             self,
@@ -81,8 +83,16 @@ impl BinOp {
                 | BinOp::GreaterEq
                 | BinOp::Equals
                 | BinOp::NotEquals
+                | BinOp::And
+                | BinOp::Or
         )
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    Not,
+    Neg,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +128,11 @@ pub enum Expr {
         op: BinOp,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
+    },
+    /// Unary operator expression. `!x` → `not(x)`; `-x` → `sub(0, x)`.
+    UnaryOp {
+        op: UnaryOp,
+        operand: Box<Expr>,
     },
 }
 
