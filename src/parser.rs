@@ -3,7 +3,7 @@
 //! Slice 1 recognizes a sequence of `var <ident>: <type> = <literal>`
 //! declarations and builds a `Program` AST.
 
-use crate::ast::{AssignOp, Expr, Literal, Program, Stmt, Trigger, Type};
+use crate::ast::{AssignOp, BinOp, Expr, Literal, Program, Stmt, Trigger, Type};
 use crate::lexer::{Span, Token};
 use chumsky::{input::ValueInput, prelude::*};
 
@@ -69,7 +69,17 @@ where
         field,
     });
 
-    let expr = literal.clone().map(Expr::Literal).or(ref_path);
+    let atom = literal.clone().map(Expr::Literal).or(ref_path);
+
+    // Binary operators. For now just `&` (string concat), left-associative.
+    let expr = atom.clone().foldl(
+        just(Token::Amp).ignore_then(atom).repeated(),
+        |lhs, rhs| Expr::BinaryOp {
+            op: BinOp::Concat,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        },
+    );
 
     let stmt = recursive(|stmt| {
         let block = stmt
@@ -94,6 +104,7 @@ where
             Token::Eq => AssignOp::Set,
             Token::PlusEq => AssignOp::Add,
             Token::MinusEq => AssignOp::Subtract,
+            Token::AmpEq => AssignOp::Concat,
         };
 
         let assign = name

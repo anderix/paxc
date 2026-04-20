@@ -1,0 +1,7 @@
+trigger manual
+
+var name: string = "David"
+var greeting: string = "Hello, " & name & "!"
+
+var log: string = "starting"
+log &= " ... done"

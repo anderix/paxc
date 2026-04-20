@@ -5,7 +5,7 @@
 //! an `actions` map. Action keys and `runAfter` predecessors come from the
 //! resolver, so this layer is purely a tree-to-JSON translation.
 
-use crate::ast::{Expr, Literal, Trigger, Type};
+use crate::ast::{BinOp, Expr, Literal, Trigger, Type};
 use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram};
 use serde_json::{Map, Value, json};
 
@@ -135,11 +135,29 @@ fn pa_expr(expr: &Expr) -> String {
         Expr::ComposeRef(action_name) => format!("outputs('{action_name}')"),
         Expr::IteratorRef(action_name) => format!("items('{action_name}')"),
         Expr::Member { target, field } => format!("{}?['{}']", pa_expr(target), field),
-        Expr::Literal(_) => {
-            unreachable!("literals are handled at the value-slot level, not inside expressions")
+        Expr::Literal(lit) => pa_literal(lit),
+        Expr::BinaryOp { op, lhs, rhs } => {
+            let fn_name = match op {
+                BinOp::Concat => "concat",
+            };
+            format!("{}({}, {})", fn_name, pa_expr(lhs), pa_expr(rhs))
         }
         Expr::Ref(_) => {
             unreachable!("resolver should have rewritten Expr::Ref before emit")
+        }
+    }
+}
+
+/// Renders a literal as it appears *inside* a PA expression (not at a JSON value slot).
+/// Strings are single-quoted (with internal quotes doubled); numbers and bools are bare.
+fn pa_literal(lit: &Literal) -> String {
+    match lit {
+        Literal::Null => "null".to_string(),
+        Literal::Int(n) => n.to_string(),
+        Literal::Bool(b) => b.to_string(),
+        Literal::String(s) => format!("'{}'", s.replace('\'', "''")),
+        Literal::Array(_) | Literal::Object(_) => {
+            unreachable!("array and object literals are not supported inside PA expressions yet")
         }
     }
 }
@@ -229,6 +247,32 @@ mod tests {
         assert_eq!(action["inputs"]["variables"][0]["type"], "Integer");
         assert_eq!(action["inputs"]["variables"][0]["value"], 1);
         assert_eq!(action["runAfter"], json!({}));
+    }
+
+    #[test]
+    fn slice14_concat_emits_concat_function() {
+        let out = compile(
+            r#"var greeting: string = "hello"
+var message: string = greeting & ", world""#,
+        );
+        let msg_value = &out["definition"]["actions"]["Initialize_message"]["inputs"]
+            ["variables"][0]["value"];
+        assert_eq!(
+            msg_value.as_str().unwrap(),
+            "@{concat(variables('greeting'), ', world')}"
+        );
+    }
+
+    #[test]
+    fn slice14_concat_assign_emits_append_to_string() {
+        let out = compile(
+            r#"var msg: string = "hi"
+msg &= "!""#,
+        );
+        let action = &out["definition"]["actions"]["Append_to_msg"];
+        assert_eq!(action["type"], "AppendToStringVariable");
+        assert_eq!(action["inputs"]["name"], "msg");
+        assert_eq!(action["inputs"]["value"], "!");
     }
 
     #[test]

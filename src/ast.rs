@@ -52,6 +52,12 @@ pub enum AssignOp {
     Set,
     Add,
     Subtract,
+    Concat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinOp {
+    Concat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +88,12 @@ pub enum Expr {
     /// Reference to a foreach iterator. Payload is the `Apply_to_each` action
     /// key the iterator belongs to. Emits `items('action_name')`.
     IteratorRef(String),
+    /// Binary operator expression. Emits as a PA function call, e.g. `&` → `concat(lhs, rhs)`.
+    BinaryOp {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone)]

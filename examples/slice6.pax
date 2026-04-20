@@ -9,7 +9,7 @@ counter += 1
 counter -= 1
 counter = 10
 
-message += ", world"
+message &= ", world"
 
 tags += "urgent"
 tags += "review"

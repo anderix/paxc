@@ -101,6 +101,7 @@ impl fmt::Display for ResolveError {
                     AssignOp::Set => "=",
                     AssignOp::Add => "+=",
                     AssignOp::Subtract => "-=",
+                    AssignOp::Concat => "&=",
                 };
                 let ty_str = type_name(ty);
                 write!(
@@ -296,13 +297,6 @@ fn lower_assign(
                     value,
                 },
             )),
-            Type::String => Ok((
-                format!("Append_to_{name}"),
-                ActionKind::AppendToStringVariable {
-                    var: name.to_string(),
-                    value,
-                },
-            )),
             Type::Array => Ok((
                 format!("Append_to_{name}"),
                 ActionKind::AppendToArrayVariable {
@@ -316,6 +310,16 @@ fn lower_assign(
             Type::Int => Ok((
                 format!("Decrement_{name}"),
                 ActionKind::DecrementVariable {
+                    var: name.to_string(),
+                    value,
+                },
+            )),
+            _ => Err(invalid()),
+        },
+        AssignOp::Concat => match ty {
+            Type::String => Ok((
+                format!("Append_to_{name}"),
+                ActionKind::AppendToStringVariable {
                     var: name.to_string(),
                     value,
                 },
@@ -357,6 +361,15 @@ fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, Res
             })
         }
         Expr::VarRef(_) | Expr::ComposeRef(_) | Expr::IteratorRef(_) => Ok(expr.clone()),
+        Expr::BinaryOp { op, lhs, rhs } => {
+            let lhs = resolve_expr(lhs, env)?;
+            let rhs = resolve_expr(rhs, env)?;
+            Ok(Expr::BinaryOp {
+                op: *op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            })
+        }
     }
 }
 
@@ -499,7 +512,6 @@ mod tests {
     fn add_dispatches_by_type() {
         let cases = [
             (Type::Int, "Increment_x"),
-            (Type::String, "Append_to_x"),
             (Type::Array, "Append_to_x"),
         ];
         for (ty, expected_name) in cases {
@@ -516,13 +528,55 @@ mod tests {
     }
 
     #[test]
-    fn add_rejects_bool_and_object() {
-        for ty in [Type::Bool, Type::Object] {
+    fn add_rejects_string_bool_and_object() {
+        for ty in [Type::String, Type::Bool, Type::Object] {
             let prog = Program {
                 trigger: Trigger::Manual,
                 statements: vec![
                     var_ty("x", ty.clone()),
                     assign("x", AssignOp::Add, Expr::Literal(Literal::Int(1))),
+                ],
+            };
+            assert!(matches!(
+                resolve(&prog).unwrap_err(),
+                ResolveError::InvalidOperation { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn concat_assign_dispatches_to_string_append() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var_ty("msg", Type::String),
+                assign(
+                    "msg",
+                    AssignOp::Concat,
+                    Expr::Literal(Literal::String("!".to_string())),
+                ),
+            ],
+        };
+        let resolved = resolve(&prog).unwrap();
+        assert_eq!(resolved.actions[1].name, "Append_to_msg");
+        assert!(matches!(
+            resolved.actions[1].kind,
+            ActionKind::AppendToStringVariable { .. }
+        ));
+    }
+
+    #[test]
+    fn concat_assign_rejects_non_string() {
+        for ty in [Type::Int, Type::Bool, Type::Array, Type::Object] {
+            let prog = Program {
+                trigger: Trigger::Manual,
+                statements: vec![
+                    var_ty("x", ty.clone()),
+                    assign(
+                        "x",
+                        AssignOp::Concat,
+                        Expr::Literal(Literal::String("".to_string())),
+                    ),
                 ],
             };
             assert!(matches!(

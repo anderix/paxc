@@ -28,6 +28,8 @@ pub enum Token<'src> {
     Eq,
     PlusEq,
     MinusEq,
+    AmpEq,
+    Amp,
     Comma,
     Dot,
     LBracket,
@@ -62,11 +64,13 @@ pub fn lexer<'src>()
     let compound = choice((
         just("+=").to(Token::PlusEq),
         just("-=").to(Token::MinusEq),
+        just("&=").to(Token::AmpEq),
     ));
 
     let ctrl = choice((
         just(':').to(Token::Colon),
         just('=').to(Token::Eq),
+        just('&').to(Token::Amp),
         just(',').to(Token::Comma),
         just('.').to(Token::Dot),
         just('[').to(Token::LBracket),
