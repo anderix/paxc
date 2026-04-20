@@ -1,0 +1,11 @@
+var counter: int = 1
+var tags: array = ["urgent", "review", "followup"]
+var config: object = {
+  "region": "us-east",
+  "retries": 3,
+  "dry_run": false,
+}
+var tasks: array = [
+  { "title": "Buy groceries", "done": true },
+  { "title": "Write memo",    "done": false },
+]

@@ -18,6 +18,11 @@ pub enum Token<'src> {
     Bool(bool),
     Colon,
     Eq,
+    Comma,
+    LBracket,
+    RBracket,
+    LBrace,
+    RBrace,
 }
 
 pub fn lexer<'src>()
@@ -33,7 +38,15 @@ pub fn lexer<'src>()
         .then_ignore(just('"'))
         .map(Token::Str);
 
-    let ctrl = choice((just(':').to(Token::Colon), just('=').to(Token::Eq)));
+    let ctrl = choice((
+        just(':').to(Token::Colon),
+        just('=').to(Token::Eq),
+        just(',').to(Token::Comma),
+        just('[').to(Token::LBracket),
+        just(']').to(Token::RBracket),
+        just('{').to(Token::LBrace),
+        just('}').to(Token::RBrace),
+    ));
 
     let ident = text::ascii::ident().map(|s: &str| match s {
         "var" => Token::Var,

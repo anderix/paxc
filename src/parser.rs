@@ -18,13 +18,37 @@ where
         Token::Ident("int") => Type::Int,
         Token::Ident("string") => Type::String,
         Token::Ident("bool") => Type::Bool,
+        Token::Ident("array") => Type::Array,
+        Token::Ident("object") => Type::Object,
     };
 
-    let literal = select! {
-        Token::Int(n) => Expr::Literal(Literal::Int(n)),
-        Token::Str(s) => Expr::Literal(Literal::String(s.to_string())),
-        Token::Bool(b) => Expr::Literal(Literal::Bool(b)),
-    };
+    let literal = recursive(|literal| {
+        let scalar = select! {
+            Token::Int(n) => Literal::Int(n),
+            Token::Str(s) => Literal::String(s.to_string()),
+            Token::Bool(b) => Literal::Bool(b),
+        };
+
+        let array = literal
+            .clone()
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBracket), just(Token::RBracket))
+            .map(Literal::Array);
+
+        let key = select! { Token::Str(s) => s.to_string() };
+        let entry = key.then_ignore(just(Token::Colon)).then(literal.clone());
+        let object = entry
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace))
+            .map(Literal::Object);
+
+        scalar.or(array).or(object)
+    })
+    .map(Expr::Literal);
 
     let var_decl = just(Token::Var)
         .ignore_then(name)
@@ -70,6 +94,31 @@ mod tests {
                 assert_eq!(name, "counter");
                 assert!(matches!(ty, Type::Int));
                 assert!(matches!(value, Expr::Literal(Literal::Int(1))));
+            }
+        }
+    }
+
+    #[test]
+    fn slice4_array_and_object() {
+        let prog = parse(
+            r#"var tasks: array = [
+                { "title": "a", "done": true },
+                { "title": "b", "done": false },
+            ]"#,
+        );
+        match &prog.statements[0] {
+            Stmt::VarDecl { ty, value, .. } => {
+                assert!(matches!(ty, Type::Array));
+                let Expr::Literal(Literal::Array(items)) = value else {
+                    panic!("expected array");
+                };
+                assert_eq!(items.len(), 2);
+                let Literal::Object(entries) = &items[0] else {
+                    panic!("expected object");
+                };
+                assert_eq!(entries[0].0, "title");
+                assert!(matches!(&entries[0].1, Literal::String(s) if s == "a"));
+                assert!(matches!(&entries[1].1, Literal::Bool(true)));
             }
         }
     }

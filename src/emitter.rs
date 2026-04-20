@@ -46,11 +46,11 @@ fn emit_var_decl(name: &str, ty: &Type, value: &Expr) -> Value {
         Type::Int => "Integer",
         Type::String => "String",
         Type::Bool => "Boolean",
+        Type::Array => "Array",
+        Type::Object => "Object",
     };
     let value_json = match value {
-        Expr::Literal(Literal::Int(n)) => json!(n),
-        Expr::Literal(Literal::String(s)) => json!(s),
-        Expr::Literal(Literal::Bool(b)) => json!(b),
+        Expr::Literal(lit) => literal_to_json(lit),
     };
     json!({
         "type": "InitializeVariable",
@@ -60,6 +60,22 @@ fn emit_var_decl(name: &str, ty: &Type, value: &Expr) -> Value {
             ]
         }
     })
+}
+
+fn literal_to_json(lit: &Literal) -> Value {
+    match lit {
+        Literal::Int(n) => json!(n),
+        Literal::String(s) => json!(s),
+        Literal::Bool(b) => json!(b),
+        Literal::Array(items) => Value::Array(items.iter().map(literal_to_json).collect()),
+        Literal::Object(entries) => {
+            let mut map = Map::new();
+            for (k, v) in entries {
+                map.insert(k.clone(), literal_to_json(v));
+            }
+            Value::Object(map)
+        }
+    }
 }
 
 fn splice_run_after(mut action_body: Value, predecessors: &[String]) -> Value {

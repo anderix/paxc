@@ -23,6 +23,8 @@ pub enum Type {
     Int,
     String,
     Bool,
+    Array,
+    Object,
 }
 
 #[derive(Debug, Clone)]
@@ -35,4 +37,6 @@ pub enum Literal {
     Int(i64),
     String(String),
     Bool(bool),
+    Array(Vec<Literal>),
+    Object(Vec<(String, Literal)>),
 }
