@@ -56,8 +56,17 @@ fn emit_action(action: &ResolvedAction) -> Value {
         ActionKind::AppendToArrayVariable { var, value } => {
             emit_mutation("AppendToArrayVariable", var, value)
         }
+        ActionKind::Raw { body } => emit_raw(body),
     };
     splice_run_after(body, &action.run_after)
+}
+
+fn emit_raw(body: &[(String, Literal)]) -> Value {
+    let mut map = Map::new();
+    for (k, v) in body {
+        map.insert(k.clone(), literal_to_json(v));
+    }
+    Value::Object(map)
 }
 
 fn emit_mutation(action_type: &str, var: &str, value: &Expr) -> Value {
@@ -99,6 +108,7 @@ fn emit_initialize(name: &str, ty: &Type, value: &Expr) -> Value {
 
 fn literal_to_json(lit: &Literal) -> Value {
     match lit {
+        Literal::Null => Value::Null,
         Literal::Int(n) => json!(n),
         Literal::String(s) => json!(s),
         Literal::Bool(b) => json!(b),

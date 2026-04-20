@@ -6,7 +6,7 @@
 //! tracks variable types in an environment, and lowers each AST statement
 //! into a concrete `ActionKind` the emitter can render directly.
 
-use crate::ast::{AssignOp, Expr, Program, Stmt, Trigger, Type};
+use crate::ast::{AssignOp, Expr, Literal, Program, Stmt, Trigger, Type};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -49,6 +49,9 @@ pub enum ActionKind {
     AppendToArrayVariable {
         var: String,
         value: Expr,
+    },
+    Raw {
+        body: Vec<(String, Literal)>,
     },
 }
 
@@ -126,6 +129,12 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
                     .clone();
                 lower_assign(name, *op, &ty, value.clone())?
             }
+            Stmt::Raw { name, body } => (
+                name.clone(),
+                ActionKind::Raw {
+                    body: body.clone(),
+                },
+            ),
         };
 
         let action_name = unique_name(&base_name, &mut name_counts);

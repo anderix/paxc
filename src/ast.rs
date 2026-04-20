@@ -27,6 +27,10 @@ pub enum Stmt {
         op: AssignOp,
         value: Expr,
     },
+    Raw {
+        name: String,
+        body: Vec<(String, Literal)>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +57,7 @@ pub enum Expr {
 
 #[derive(Debug, Clone)]
 pub enum Literal {
+    Null,
     Int(i64),
     String(String),
     Bool(bool),

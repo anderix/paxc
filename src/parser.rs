@@ -24,6 +24,7 @@ where
 
     let literal = recursive(|literal| {
         let scalar = select! {
+            Token::Null => Literal::Null,
             Token::Int(n) => Literal::Int(n),
             Token::Str(s) => Literal::String(s.to_string()),
             Token::Bool(b) => Literal::Bool(b),
@@ -49,9 +50,19 @@ where
         scalar.or(array).or(object)
     });
 
+    let object_entries = {
+        let key = select! { Token::Str(s) => s.to_string() };
+        let entry = key.then_ignore(just(Token::Colon)).then(literal.clone());
+        entry
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace))
+    };
+
     let reference = select! { Token::Ident(s) => Expr::Ref(s.to_string()) };
 
-    let expr = literal.map(Expr::Literal).or(reference);
+    let expr = literal.clone().map(Expr::Literal).or(reference);
 
     let var_decl = just(Token::Var)
         .ignore_then(name)
@@ -80,7 +91,12 @@ where
             value,
         });
 
-    let stmt = var_decl.or(assign);
+    let raw_stmt = just(Token::Raw)
+        .ignore_then(select! { Token::Ident(s) => s.to_string() })
+        .then(object_entries)
+        .map(|(name, body)| Stmt::Raw { name, body });
+
+    let stmt = var_decl.or(raw_stmt).or(assign);
 
     let trigger = just(Token::Trigger).ignore_then(select! {
         Token::Ident("manual") => Trigger::Manual,
