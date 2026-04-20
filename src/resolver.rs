@@ -66,12 +66,17 @@ pub enum ActionKind {
         true_branch: Vec<ResolvedAction>,
         false_branch: Vec<ResolvedAction>,
     },
+    Foreach {
+        collection: Expr,
+        body: Vec<ResolvedAction>,
+    },
 }
 
 #[derive(Debug, Clone)]
 enum Binding {
     Var { ty: Type },
     Let { action_name: String },
+    Iterator { action_name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,7 +187,7 @@ fn resolve_statements(
                         let (base, kind) = lower_assign(name, *op, &ty, value)?;
                         (unique_name(&base, name_counts), kind)
                     }
-                    Some(Binding::Let { .. }) => {
+                    Some(Binding::Let { .. }) | Some(Binding::Iterator { .. }) => {
                         return Err(ResolveError::CannotAssignToImmutable {
                             name: name.clone(),
                         });
@@ -211,6 +216,39 @@ fn resolve_statements(
                         condition,
                         true_branch: true_actions,
                         false_branch: false_actions,
+                    },
+                )
+            }
+            Stmt::Foreach {
+                iter,
+                collection,
+                body,
+            } => {
+                let collection = resolve_expr(collection, env)?;
+                let action_name = unique_name("Apply_to_each", name_counts);
+                // Lexically scope the iterator: save any prior binding with the
+                // same name, install the iterator while resolving the body,
+                // then restore the saved binding (or remove if none).
+                let prev = env.insert(
+                    iter.clone(),
+                    Binding::Iterator {
+                        action_name: action_name.clone(),
+                    },
+                );
+                let body_actions = resolve_statements(body, env, name_counts)?;
+                match prev {
+                    Some(b) => {
+                        env.insert(iter.clone(), b);
+                    }
+                    None => {
+                        env.remove(iter);
+                    }
+                }
+                (
+                    action_name,
+                    ActionKind::Foreach {
+                        collection,
+                        body: body_actions,
                     },
                 )
             }
@@ -306,6 +344,9 @@ fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, Res
         Expr::Ref(name) => match env.get(name) {
             Some(Binding::Var { .. }) => Ok(Expr::VarRef(name.clone())),
             Some(Binding::Let { action_name }) => Ok(Expr::ComposeRef(action_name.clone())),
+            Some(Binding::Iterator { action_name }) => {
+                Ok(Expr::IteratorRef(action_name.clone()))
+            }
             None => Err(ResolveError::UndefinedVariable { name: name.clone() }),
         },
         Expr::Member { target, field } => {
@@ -315,7 +356,7 @@ fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, Res
                 field: field.clone(),
             })
         }
-        Expr::VarRef(_) | Expr::ComposeRef(_) => Ok(expr.clone()),
+        Expr::VarRef(_) | Expr::ComposeRef(_) | Expr::IteratorRef(_) => Ok(expr.clone()),
     }
 }
 

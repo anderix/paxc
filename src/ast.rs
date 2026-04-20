@@ -40,6 +40,11 @@ pub enum Stmt {
         true_branch: Vec<Stmt>,
         false_branch: Vec<Stmt>,
     },
+    Foreach {
+        iter: String,
+        collection: Expr,
+        body: Vec<Stmt>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +79,9 @@ pub enum Expr {
         target: Box<Expr>,
         field: String,
     },
+    /// Reference to a foreach iterator. Payload is the `Apply_to_each` action
+    /// key the iterator belongs to. Emits `items('action_name')`.
+    IteratorRef(String),
 }
 
 #[derive(Debug, Clone)]

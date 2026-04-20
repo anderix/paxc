@@ -139,9 +139,21 @@ where
                 })
         });
 
+        let foreach_stmt = just(Token::Foreach)
+            .ignore_then(name)
+            .then_ignore(just(Token::In))
+            .then(expr.clone())
+            .then(block.clone())
+            .map(|((iter, collection), body)| Stmt::Foreach {
+                iter: iter.to_string(),
+                collection,
+                body,
+            });
+
         var_decl
             .or(let_decl)
             .or(if_stmt)
+            .or(foreach_stmt)
             .or(raw_stmt)
             .or(assign)
     });

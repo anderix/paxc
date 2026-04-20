@@ -66,8 +66,17 @@ fn emit_action(action: &ResolvedAction) -> Value {
             true_branch,
             false_branch,
         } => emit_condition(condition, true_branch, false_branch),
+        ActionKind::Foreach { collection, body } => emit_foreach(collection, body),
     };
     splice_run_after(body, &action.run_after)
+}
+
+fn emit_foreach(collection: &Expr, body: &[ResolvedAction]) -> Value {
+    json!({
+        "type": "Foreach",
+        "foreach": expr_to_pa_field(collection),
+        "actions": build_actions_map(body),
+    })
 }
 
 fn emit_condition(
@@ -124,6 +133,7 @@ fn pa_expr(expr: &Expr) -> String {
     match expr {
         Expr::VarRef(name) => format!("variables('{name}')"),
         Expr::ComposeRef(action_name) => format!("outputs('{action_name}')"),
+        Expr::IteratorRef(action_name) => format!("items('{action_name}')"),
         Expr::Member { target, field } => format!("{}?['{}']", pa_expr(target), field),
         Expr::Literal(_) => {
             unreachable!("literals are handled at the value-slot level, not inside expressions")
@@ -132,6 +142,12 @@ fn pa_expr(expr: &Expr) -> String {
             unreachable!("resolver should have rewritten Expr::Ref before emit")
         }
     }
+}
+
+/// Emits an expression as a bare PA field value (e.g. Foreach's `foreach`
+/// field), which uses a single `@` prefix rather than `@{...}`.
+fn expr_to_pa_field(expr: &Expr) -> String {
+    format!("@{}", pa_expr(expr))
 }
 
 fn emit_initialize(name: &str, ty: &Type, value: &Expr) -> Value {

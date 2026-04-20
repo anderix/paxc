@@ -1,0 +1,19 @@
+trigger manual
+
+var tasks: array = [
+  { "title": "Buy groceries", "done": true  },
+  { "title": "Write memo",    "done": false },
+  { "title": "Call plumber",  "done": false },
+]
+
+var total: int = 0
+var pending_titles: array = []
+
+foreach task in tasks {
+  total += 1
+  if task.done {
+    total += 1
+  } else {
+    pending_titles += task.title
+  }
+}
