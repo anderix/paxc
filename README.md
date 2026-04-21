@@ -1,10 +1,12 @@
 # paxc — the pax compiler
 
-`paxc` compiles the **pax** DSL into [Power Automate](https://powerautomate.microsoft.com/) cloud flow definitions. Write terse, readable code; get the verbose `definition.json` that Power Automate expects.
+`paxc` compiles the **pax** DSL into [Power Automate](https://powerautomate.microsoft.com/) cloud flow definitions. Write terse, readable code; get the verbose `definition.json` that Power Automate expects. Companion interpreter `paxr` runs the same source locally for fast iteration.
+
+For the full language reference, see [REFERENCE.md](REFERENCE.md).
 
 ## Status
 
-Pre-alpha. The language is designed, the compiler is not yet implemented. See below for what v1 will support.
+v1.2 shipped. Every construct listed in REFERENCE.md is implemented and tested, end-to-end deployment to Power Automate has been validated, and a legacy-format package target lets you import compiled flows directly through the Power Automate portal.
 
 ## Why
 
@@ -32,16 +34,9 @@ var counter: int = 1
 
 The source is shorter, and more importantly, the `runAfter` dependency graph is inferred from source order so you never hand-wire it.
 
-## v1 scope
+## What pax covers
 
-Built-in constructs that compile natively:
-
-- Variable declaration and mutation (`var`, `let`, `=`, `+=`, etc.)
-- `Compose` via `let`
-- `if` / `else if` / `else`
-- `foreach item in collection { ... }`
-- Manual button trigger
-- Raw-JSON escape hatch for any action pax doesn't support natively (including all connector actions like SharePoint, Outlook, Teams, etc.)
+The language supports manual triggers, typed variables and Compose bindings, assignment and compound assignment, arithmetic and boolean expressions, string concatenation, member access, `if`/`else if`/`else` and `foreach` control flow, function calls that pass through to Power Automate's expression language, a `raw` escape hatch for anything pax doesn't model natively (including all connector actions), and a `debug()` statement that paxr prints at runtime and paxc strips at compile time.
 
 ## Building
 
@@ -51,7 +46,7 @@ Requires Rust (edition 2024, toolchain 1.85+).
 cargo build --release
 ```
 
-The binary will be at `target/release/paxc`.
+The binaries will be at `target/release/paxc` and `target/release/paxr`.
 
 ## License
 
