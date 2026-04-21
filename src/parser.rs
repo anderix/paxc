@@ -259,8 +259,11 @@ where
             });
 
         let if_stmt = recursive(|if_stmt| {
+            let spanned_condition = expr
+                .clone()
+                .map_with(|cond, e| (cond, e.span()));
             just(Token::If)
-                .ignore_then(expr.clone())
+                .ignore_then(spanned_condition)
                 .then(block.clone())
                 .then(
                     just(Token::Else)
@@ -271,8 +274,9 @@ where
                         )
                         .or_not(),
                 )
-                .map(|((condition, true_branch), else_branch)| Stmt::If {
+                .map(|(((condition, condition_span), true_branch), else_branch)| Stmt::If {
                     condition,
+                    condition_span,
                     true_branch,
                     false_branch: else_branch.unwrap_or_default(),
                 })
@@ -399,6 +403,29 @@ mod tests {
             result.has_errors(),
             "chained comparisons should not parse"
         );
+    }
+
+    #[test]
+    fn slice23_if_condition_span_covers_source() {
+        // paxr's verbose trace uses this span to render
+        // `condition? (<source>) = true/false`.
+        let src = "trigger manual\nvar x: int = 1\nif x == 1 { x = 2 }";
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        let prog = parser()
+            .parse(
+                tokens
+                    .as_slice()
+                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+            )
+            .into_result()
+            .expect("parse failed");
+        match &prog.statements[1] {
+            Stmt::If { condition_span, .. } => {
+                let slice = &src[condition_span.start..condition_span.end];
+                assert_eq!(slice, "x == 1");
+            }
+            _ => panic!("expected if stmt"),
+        }
     }
 
     #[test]

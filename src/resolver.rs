@@ -68,11 +68,18 @@ pub enum ActionKind {
     },
     Condition {
         condition: Expr,
+        /// Source span of the condition, threaded through from the parser
+        /// so paxr can render `condition? (source) = true/false` in verbose
+        /// traces. The emitter ignores this field.
+        condition_span: Span,
         true_branch: Vec<ResolvedAction>,
         false_branch: Vec<ResolvedAction>,
     },
     Foreach {
         collection: Expr,
+        /// User-facing iterator name (e.g. `task` from `foreach task in ...`),
+        /// used by paxr verbose traces. The emitter keys by `action.name`.
+        iter_name: String,
         body: Vec<ResolvedAction>,
     },
     /// `debug(args)` diagnostic. paxc skips these at emit time and counts
@@ -239,6 +246,7 @@ fn resolve_statements(
             }
             Stmt::If {
                 condition,
+                condition_span,
                 true_branch,
                 false_branch,
             } => {
@@ -258,6 +266,7 @@ fn resolve_statements(
                     action_name,
                     ActionKind::Condition {
                         condition,
+                        condition_span: *condition_span,
                         true_branch: true_actions,
                         false_branch: false_actions,
                     },
@@ -285,6 +294,7 @@ fn resolve_statements(
                     action_name,
                     ActionKind::Foreach {
                         collection,
+                        iter_name: iter.clone(),
                         body: body_actions,
                     },
                 )
@@ -804,6 +814,7 @@ mod tests {
                 var_ty("flag", Type::Bool),
                 Stmt::If {
                     condition: Expr::Ref("flag".to_string()),
+                    condition_span: (0..0).into(),
                     true_branch: vec![var("inner")],
                     false_branch: vec![],
                 },
@@ -846,6 +857,7 @@ mod tests {
                 var_ty("flag", Type::Bool),
                 Stmt::If {
                     condition: Expr::Ref("flag".to_string()),
+                    condition_span: (0..0).into(),
                     true_branch: vec![let_stmt(
                         "inner",
                         Expr::Literal(Literal::Int(1)),
@@ -873,6 +885,7 @@ mod tests {
                 var_ty("flag", Type::Bool),
                 Stmt::If {
                     condition: Expr::Ref("flag".to_string()),
+                    condition_span: (0..0).into(),
                     true_branch: vec![let_stmt(
                         "inner",
                         Expr::Literal(Literal::Int(1)),
@@ -927,6 +940,7 @@ mod tests {
                 var_ty("outer", Type::Int),
                 Stmt::If {
                     condition: Expr::Literal(Literal::Bool(true)),
+                    condition_span: (0..0).into(),
                     true_branch: vec![let_stmt(
                         "copy",
                         Expr::Ref("outer".to_string()),

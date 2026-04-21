@@ -48,6 +48,9 @@ pub enum Stmt {
     },
     If {
         condition: Expr,
+        /// Source span of the condition expression -- used by paxr in
+        /// verbose mode to render `condition? (source) = true/false` traces.
+        condition_span: Span,
         true_branch: Vec<Stmt>,
         false_branch: Vec<Stmt>,
     },

@@ -10,12 +10,20 @@ use paxc::{interpreter, lexer, parser, resolver};
 use std::{env, fs, process};
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 2 {
-        eprintln!("usage: paxr <file.pax>");
+    let argv: Vec<String> = env::args().skip(1).collect();
+    let mut verbose = false;
+    let mut positional: Vec<String> = Vec::new();
+    for arg in argv {
+        match arg.as_str() {
+            "--verbose" | "-v" => verbose = true,
+            _ => positional.push(arg),
+        }
+    }
+    if positional.len() != 1 {
+        eprintln!("usage: paxr [--verbose] <file.pax>");
         process::exit(2);
     }
-    let path = &args[1];
+    let path = &positional[0];
     let src = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -59,7 +67,8 @@ fn main() {
         }
     };
 
-    let state = match interpreter::interpret(&src, &resolved) {
+    let config = interpreter::Config { verbose };
+    let state = match interpreter::interpret_with(&src, &resolved, config) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("runtime error: {e}");

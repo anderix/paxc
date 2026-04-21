@@ -101,8 +101,24 @@ fn err(msg: impl Into<String>) -> InterpretError {
     }
 }
 
+/// Runtime configuration for a paxr invocation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Config {
+    /// When true, emit an action-by-action trace to stdout as the interpreter
+    /// walks the resolved program.
+    pub verbose: bool,
+}
+
 pub fn interpret(src: &str, program: &ResolvedProgram) -> Result<FinalState, InterpretError> {
-    let mut interp = Interpreter::new(src);
+    interpret_with(src, program, Config::default())
+}
+
+pub fn interpret_with(
+    src: &str,
+    program: &ResolvedProgram,
+    config: Config,
+) -> Result<FinalState, InterpretError> {
+    let mut interp = Interpreter::new(src, config);
     interp.run_actions(&program.actions, true)?;
     Ok(FinalState {
         bindings: interp.bindings,
@@ -145,6 +161,9 @@ pub enum BindingLookup {
 
 struct Interpreter<'src> {
     src: &'src str,
+    config: Config,
+    /// Current verbose-trace indent depth (in nesting levels, 2 spaces each).
+    indent: usize,
     vars: HashMap<String, Value>,
     /// Keyed by Compose action name (e.g. `Compose_remaining`).
     compose_outputs: HashMap<String, Value>,
@@ -157,13 +176,36 @@ struct Interpreter<'src> {
 }
 
 impl<'src> Interpreter<'src> {
-    fn new(src: &'src str) -> Self {
+    fn new(src: &'src str, config: Config) -> Self {
         Self {
             src,
+            config,
+            indent: 0,
             vars: HashMap::new(),
             compose_outputs: HashMap::new(),
             iterators: HashMap::new(),
             bindings: Vec::new(),
+        }
+    }
+
+    /// Verbose-only trace line. Suppressed entirely when `config.verbose`
+    /// is false.
+    fn trace(&self, msg: &str) {
+        if self.config.verbose {
+            self.always_print(msg);
+        }
+    }
+
+    /// Always prints. In default mode, the message goes at column 0 (no
+    /// indent context is visible, so leading whitespace would be confusing).
+    /// In verbose mode, indent aligns with surrounding trace lines so the
+    /// debug / raw-skip / unknown-call notices sit in the right place in
+    /// the execution structure.
+    fn always_print(&self, msg: &str) {
+        if self.config.verbose {
+            println!("{}{}", "  ".repeat(self.indent), msg);
+        } else {
+            println!("{msg}");
         }
     }
 
@@ -186,6 +228,7 @@ impl<'src> Interpreter<'src> {
         match &action.kind {
             ActionKind::InitializeVariable { var, ty, value } => {
                 let v = self.eval(value)?;
+                self.trace(&format!("init {var} = {}", v.display_compact()));
                 self.vars.insert(var.clone(), v);
                 // Resolver already enforces var decls are top-level, but
                 // guard anyway -- the interpreter doesn't need to know why.
@@ -199,6 +242,7 @@ impl<'src> Interpreter<'src> {
             }
             ActionKind::SetVariable { var, value } => {
                 let v = self.eval(value)?;
+                self.trace(&format!("set {var} = {}", v.display_compact()));
                 self.vars.insert(var.clone(), v);
             }
             ActionKind::IncrementVariable { var, value } => {
@@ -210,7 +254,9 @@ impl<'src> Interpreter<'src> {
                     .get(var)
                     .and_then(Value::as_int)
                     .ok_or_else(|| err(format!("variable {var} is not an int")))?;
-                self.vars.insert(var.clone(), Value::Int(current + delta));
+                let new = current + delta;
+                self.trace(&format!("increment {var} = {new}"));
+                self.vars.insert(var.clone(), Value::Int(new));
             }
             ActionKind::DecrementVariable { var, value } => {
                 let delta = self.eval(value)?.as_int().ok_or_else(|| {
@@ -221,7 +267,9 @@ impl<'src> Interpreter<'src> {
                     .get(var)
                     .and_then(Value::as_int)
                     .ok_or_else(|| err(format!("variable {var} is not an int")))?;
-                self.vars.insert(var.clone(), Value::Int(current - delta));
+                let new = current - delta;
+                self.trace(&format!("decrement {var} = {new}"));
+                self.vars.insert(var.clone(), Value::Int(new));
             }
             ActionKind::AppendToStringVariable { var, value } => {
                 let suffix = self.eval(value)?.coerce_str();
@@ -229,7 +277,12 @@ impl<'src> Interpreter<'src> {
                     Some(Value::Str(s)) => s.clone(),
                     _ => return Err(err(format!("variable {var} is not a string"))),
                 };
-                self.vars.insert(var.clone(), Value::Str(current + &suffix));
+                let new = Value::Str(current + &suffix);
+                self.trace(&format!(
+                    "append_string {var} = {}",
+                    new.display_compact()
+                ));
+                self.vars.insert(var.clone(), new);
             }
             ActionKind::AppendToArrayVariable { var, value } => {
                 let item = self.eval(value)?;
@@ -238,10 +291,16 @@ impl<'src> Interpreter<'src> {
                     _ => return Err(err(format!("variable {var} is not an array"))),
                 };
                 arr.push(item);
-                self.vars.insert(var.clone(), Value::Array(arr));
+                let new = Value::Array(arr);
+                self.trace(&format!(
+                    "append_array {var} = {}",
+                    new.display_compact()
+                ));
+                self.vars.insert(var.clone(), new);
             }
             ActionKind::Compose { name, value } => {
                 let v = self.eval(value)?;
+                self.trace(&format!("compose {name} = {}", v.display_compact()));
                 self.compose_outputs.insert(action.name.clone(), v);
                 if top_level {
                     self.bindings.push(Binding {
@@ -252,28 +311,47 @@ impl<'src> Interpreter<'src> {
                 }
             }
             ActionKind::Raw { .. } => {
-                // paxr does not execute raw blocks. Surface the skip so the
-                // developer knows their state may diverge from what the
-                // compiled flow would produce.
-                println!("<skipping raw \"{}\">", action.name);
+                // Always surface raw skips so the developer knows their
+                // state may diverge from the compiled flow.
+                self.always_print(&format!("<skipping raw \"{}\">", action.name));
             }
             ActionKind::Condition {
                 condition,
+                condition_span,
                 true_branch,
                 false_branch,
             } => {
                 let taken = self.eval(condition)?.as_bool().unwrap_or(false);
+                let source = source_slice(self.src, *condition_span);
+                self.trace(&format!("condition? ({source}) = {taken}"));
                 let branch = if taken { true_branch } else { false_branch };
+                self.indent += 1;
                 self.run_actions(branch, false)?;
+                self.indent -= 1;
             }
-            ActionKind::Foreach { collection, body } => {
+            ActionKind::Foreach {
+                collection,
+                iter_name,
+                body,
+            } => {
                 let items = match self.eval(collection)? {
                     Value::Array(items) => items,
                     _ => return Err(err("foreach requires an array")),
                 };
-                for item in items {
-                    self.iterators.insert(action.name.clone(), item);
+                self.trace(&format!(
+                    "foreach {} ({} items)",
+                    action.name,
+                    items.len()
+                ));
+                for (idx, item) in items.into_iter().enumerate() {
+                    self.iterators.insert(action.name.clone(), item.clone());
+                    self.indent += 1;
+                    self.trace(&format!(
+                        "iter[{idx}] {iter_name} = {}",
+                        item.display_compact()
+                    ));
                     self.run_actions(body, false)?;
+                    self.indent -= 1;
                 }
                 self.iterators.remove(&action.name);
             }
@@ -287,7 +365,7 @@ impl<'src> Interpreter<'src> {
     fn emit_debug(&mut self, args: &[DebugArg], stmt_span: Span) -> Result<(), InterpretError> {
         let line = span_to_line(self.src, stmt_span.start);
         if args.is_empty() {
-            println!("debug: at line {line}");
+            self.always_print(&format!("debug: at line {line}"));
             return Ok(());
         }
         let mut parts: Vec<String> = Vec::with_capacity(args.len());
@@ -296,7 +374,7 @@ impl<'src> Interpreter<'src> {
             let value = self.eval(&arg.expr)?;
             parts.push(format!("{label}={}", value.display_compact()));
         }
-        println!("debug: {} at line {line}", parts.join(", "));
+        self.always_print(&format!("debug: {} at line {line}", parts.join(", ")));
         Ok(())
     }
 
@@ -346,7 +424,11 @@ impl<'src> Interpreter<'src> {
                 for a in args {
                     vals.push(self.eval(a)?);
                 }
-                Ok(eval_call(name, vals))
+                let (value, unknown) = eval_call(name, vals);
+                if unknown {
+                    self.always_print(&format!("<skipping unknown \"{name}\">"));
+                }
+                Ok(value)
             }
         }
     }
@@ -494,8 +576,11 @@ fn eval_unop(op: UnaryOp, v: Value) -> Result<Value, InterpretError> {
     }
 }
 
-fn eval_call(name: &str, args: Vec<Value>) -> Value {
-    match name {
+/// Evaluates a compiler-synthesized PA function call. Returns the value and
+/// an `unknown` flag the caller uses to decide whether to print a
+/// `<skipping unknown "name">` notice at the current indent.
+fn eval_call(name: &str, args: Vec<Value>) -> (Value, bool) {
+    let v = match name {
         "add" => binary_int(&args, i64::wrapping_add),
         "sub" => binary_int(&args, i64::wrapping_sub),
         "mul" => binary_int(&args, i64::wrapping_mul),
@@ -503,11 +588,11 @@ fn eval_call(name: &str, args: Vec<Value>) -> Value {
             if args.len() == 2 {
                 if let (Some(a), Some(b)) = (args[0].as_int(), args[1].as_int()) {
                     if b != 0 {
-                        return Value::Int(a / b);
+                        return (Value::Int(a / b), false);
                     }
                 }
             }
-            Value::Null
+            return (Value::Null, false);
         }
         "concat" => {
             let mut s = String::new();
@@ -527,11 +612,9 @@ fn eval_call(name: &str, args: Vec<Value>) -> Value {
         },
         "and" => binary_bool(&args, |a, b| a && b),
         "or" => binary_bool(&args, |a, b| a || b),
-        _ => {
-            println!("<skipping unknown \"{name}\">");
-            Value::Null
-        }
-    }
+        _ => return (Value::Null, true),
+    };
+    (v, false)
 }
 
 fn binary_int<F: Fn(i64, i64) -> i64>(args: &[Value], f: F) -> Value {

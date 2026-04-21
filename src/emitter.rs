@@ -94,8 +94,11 @@ fn emit_action(action: &ResolvedAction) -> Value {
             condition,
             true_branch,
             false_branch,
+            ..
         } => emit_condition(condition, true_branch, false_branch),
-        ActionKind::Foreach { collection, body } => emit_foreach(collection, body),
+        ActionKind::Foreach {
+            collection, body, ..
+        } => emit_foreach(collection, body),
         ActionKind::Debug { .. } => {
             // Filtered out in `build_actions_map` before reaching here.
             unreachable!("debug action reached emitter");
