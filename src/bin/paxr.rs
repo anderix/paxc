@@ -13,20 +13,24 @@ fn main() {
     let argv: Vec<String> = env::args().skip(1).collect();
     let mut verbose = false;
     let mut quiet = false;
+    let mut debug_only = false;
     let mut positional: Vec<String> = Vec::new();
     for arg in argv {
         match arg.as_str() {
             "--verbose" | "-v" => verbose = true,
             "--quiet" | "-q" => quiet = true,
+            "--debug" | "-d" => debug_only = true,
             _ => positional.push(arg),
         }
     }
-    if verbose && quiet {
-        eprintln!("paxr: --verbose and --quiet are mutually exclusive");
+    // --verbose, --quiet, --debug are pairwise mutually exclusive.
+    let mode_count = [verbose, quiet, debug_only].iter().filter(|b| **b).count();
+    if mode_count > 1 {
+        eprintln!("paxr: --verbose, --quiet, and --debug are mutually exclusive");
         process::exit(2);
     }
     if positional.len() != 1 {
-        eprintln!("usage: paxr [--verbose | --quiet] <file.pax>");
+        eprintln!("usage: paxr [--verbose | --quiet | --debug] <file.pax>");
         process::exit(2);
     }
     let path = &positional[0];
@@ -73,7 +77,11 @@ fn main() {
         }
     };
 
-    let config = interpreter::Config { verbose, quiet };
+    let config = interpreter::Config {
+        verbose,
+        quiet,
+        debug_only,
+    };
     let state = match interpreter::interpret_with(&src, &resolved, config) {
         Ok(s) => s,
         Err(e) => {
@@ -82,7 +90,7 @@ fn main() {
         }
     };
 
-    if !quiet {
+    if !quiet && !debug_only {
         print!("{}", interpreter::format_state_dump(&state));
     }
 }

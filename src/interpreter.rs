@@ -101,7 +101,9 @@ fn err(msg: impl Into<String>) -> InterpretError {
     }
 }
 
-/// Runtime configuration for a paxr invocation.
+/// Runtime configuration for a paxr invocation. The boolean fields are
+/// pairwise mutually exclusive; paxr's CLI enforces that before
+/// constructing the struct.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Config {
     /// When true, emit an action-by-action trace to stdout as the interpreter
@@ -111,6 +113,10 @@ pub struct Config {
     /// raw / unknown-call skip notices, and the end-of-run state dump. Used
     /// for scripted / CI runs that only care about exit code.
     pub quiet: bool,
+    /// When true, emit ONLY debug() output. Suppresses raw / unknown skip
+    /// notices and the end-of-run state dump so the user sees nothing but
+    /// the breadcrumbs they placed.
+    pub debug_only: bool,
 }
 
 pub fn interpret(src: &str, program: &ResolvedProgram) -> Result<FinalState, InterpretError> {
@@ -192,22 +198,37 @@ impl<'src> Interpreter<'src> {
         }
     }
 
-    /// Verbose-only trace line. Suppressed when `verbose` is false or when
-    /// `quiet` is true (quiet wins, caught via `always_print`).
+    /// Verbose-only trace line. Only fires under `--verbose`.
     fn trace(&self, msg: &str) {
         if self.config.verbose {
-            self.always_print(msg);
+            self.write_line(msg);
         }
     }
 
-    /// Always prints (except when `--quiet` suppresses all stdout). In
-    /// default mode, the message goes at column 0 (no indent context is
-    /// visible, so leading whitespace would be confusing). In verbose
-    /// mode, indent aligns with surrounding trace lines.
-    fn always_print(&self, msg: &str) {
+    /// User-placed `debug()` breadcrumb. Prints under default, --verbose,
+    /// and --debug; silenced only by --quiet.
+    fn print_debug_line(&self, msg: &str) {
         if self.config.quiet {
             return;
         }
+        self.write_line(msg);
+    }
+
+    /// Interpreter-generated notice (raw skip, unknown-call skip). Prints
+    /// under default and --verbose; silenced by --quiet or --debug (the
+    /// latter because --debug is meant to surface only the user's own
+    /// breadcrumbs).
+    fn print_notice(&self, msg: &str) {
+        if self.config.quiet || self.config.debug_only {
+            return;
+        }
+        self.write_line(msg);
+    }
+
+    /// Shared formatter: indent only under --verbose, flush-left otherwise.
+    /// Indent is context-free in non-verbose modes, so leading whitespace
+    /// there would be confusing.
+    fn write_line(&self, msg: &str) {
         if self.config.verbose {
             println!("{}{}", "  ".repeat(self.indent), msg);
         } else {
@@ -317,9 +338,9 @@ impl<'src> Interpreter<'src> {
                 }
             }
             ActionKind::Raw { .. } => {
-                // Always surface raw skips so the developer knows their
-                // state may diverge from the compiled flow.
-                self.always_print(&format!("<skipping raw \"{}\">", action.name));
+                // Surface raw skips so the developer knows their state may
+                // diverge from the compiled flow. --debug / --quiet silence.
+                self.print_notice(&format!("<skipping raw \"{}\">", action.name));
             }
             ActionKind::Condition {
                 condition,
@@ -371,7 +392,7 @@ impl<'src> Interpreter<'src> {
     fn emit_debug(&mut self, args: &[DebugArg], stmt_span: Span) -> Result<(), InterpretError> {
         let line = span_to_line(self.src, stmt_span.start);
         if args.is_empty() {
-            self.always_print(&format!("debug: at line {line}"));
+            self.print_debug_line(&format!("debug: at line {line}"));
             return Ok(());
         }
         let mut parts: Vec<String> = Vec::with_capacity(args.len());
@@ -380,7 +401,7 @@ impl<'src> Interpreter<'src> {
             let value = self.eval(&arg.expr)?;
             parts.push(format!("{label}={}", value.display_compact()));
         }
-        self.always_print(&format!("debug: {} at line {line}", parts.join(", ")));
+        self.print_debug_line(&format!("debug: {} at line {line}", parts.join(", ")));
         Ok(())
     }
 
@@ -432,7 +453,7 @@ impl<'src> Interpreter<'src> {
                 }
                 let (value, unknown) = eval_call(name, vals);
                 if unknown {
-                    self.always_print(&format!("<skipping unknown \"{name}\">"));
+                    self.print_notice(&format!("<skipping unknown \"{name}\">"));
                 }
                 Ok(value)
             }
