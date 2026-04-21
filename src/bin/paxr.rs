@@ -1,11 +1,66 @@
 //! paxr — the pax runner (interpreter).
 //!
-//! Reads a .pax file and executes it in-process, so the developer can
-//! exercise their logic without going through Power Automate.
-//!
-//! This is a stub. The interpreter lands in a later slice.
+//! Reads a .pax file, parses and resolves it the same way paxc does, and
+//! then executes it in-process so the developer can exercise their logic
+//! without going through Power Automate. Lives alongside paxc in the same
+//! crate, sharing the lexer / parser / resolver via the library.
+
+use chumsky::prelude::*;
+use paxc::{interpreter, lexer, parser, resolver};
+use std::{env, fs, process};
 
 fn main() {
-    eprintln!("paxr: not yet implemented");
-    std::process::exit(1);
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 2 {
+        eprintln!("usage: paxr <file.pax>");
+        process::exit(2);
+    }
+    let path = &args[1];
+    let src = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("paxr: cannot read {path}: {e}");
+            process::exit(1);
+        }
+    };
+
+    let tokens = match lexer::lexer().parse(src.as_str()).into_result() {
+        Ok(toks) => toks,
+        Err(errs) => {
+            for e in errs {
+                eprintln!("lex error: {e}");
+            }
+            process::exit(1);
+        }
+    };
+
+    let program = match parser::parser()
+        .parse(
+            tokens
+                .as_slice()
+                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+        )
+        .into_result()
+    {
+        Ok(p) => p,
+        Err(errs) => {
+            for e in errs {
+                eprintln!("parse error: {e:?}");
+            }
+            process::exit(1);
+        }
+    };
+
+    let resolved = match resolver::resolve(&program) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+    };
+
+    if let Err(e) = interpreter::interpret(&src, &resolved) {
+        eprintln!("runtime error: {e}");
+        process::exit(1);
+    }
 }
