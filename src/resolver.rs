@@ -99,27 +99,50 @@ enum Binding {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
-    DuplicateVariable { name: String },
-    UndefinedVariable { name: String },
-    InvalidOperation { op: AssignOp, name: String, ty: Type },
-    CannotAssignToImmutable { name: String },
+    DuplicateVariable { name: String, span: Span },
+    UndefinedVariable { name: String, span: Span },
+    InvalidOperation { op: AssignOp, name: String, ty: Type, span: Span },
+    CannotAssignToImmutable { name: String, span: Span },
     /// `var` declarations must be at the top level of the flow. PA's
     /// `InitializeVariable` action is only valid at the workflow scope,
     /// so nesting one inside a Condition or Apply_to_each produces an
     /// invalid definition.
-    NestedVarDeclaration { name: String },
+    NestedVarDeclaration { name: String, span: Span },
+}
+
+impl ResolveError {
+    pub fn span(&self) -> Span {
+        match self {
+            ResolveError::DuplicateVariable { span, .. }
+            | ResolveError::UndefinedVariable { span, .. }
+            | ResolveError::InvalidOperation { span, .. }
+            | ResolveError::CannotAssignToImmutable { span, .. }
+            | ResolveError::NestedVarDeclaration { span, .. } => *span,
+        }
+    }
+
+    /// Short label to attach to the offending span in ariadne output.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ResolveError::DuplicateVariable { .. } => "already declared",
+            ResolveError::UndefinedVariable { .. } => "not defined",
+            ResolveError::InvalidOperation { .. } => "invalid operation",
+            ResolveError::CannotAssignToImmutable { .. } => "immutable binding",
+            ResolveError::NestedVarDeclaration { .. } => "must be top-level",
+        }
+    }
 }
 
 impl fmt::Display for ResolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ResolveError::DuplicateVariable { name } => {
+            ResolveError::DuplicateVariable { name, .. } => {
                 write!(f, "`{name}` is already declared")
             }
-            ResolveError::UndefinedVariable { name } => {
+            ResolveError::UndefinedVariable { name, .. } => {
                 write!(f, "`{name}` is not defined")
             }
-            ResolveError::InvalidOperation { op, name, ty } => {
+            ResolveError::InvalidOperation { op, name, ty, .. } => {
                 let op_str = match op {
                     AssignOp::Set => "=",
                     AssignOp::Add => "+=",
@@ -132,13 +155,13 @@ impl fmt::Display for ResolveError {
                     "cannot apply `{op_str}` to variable `{name}` of type `{ty_str}`"
                 )
             }
-            ResolveError::CannotAssignToImmutable { name } => {
+            ResolveError::CannotAssignToImmutable { name, .. } => {
                 write!(
                     f,
                     "cannot assign to `{name}`: `let` bindings are immutable"
                 )
             }
-            ResolveError::NestedVarDeclaration { name } => {
+            ResolveError::NestedVarDeclaration { name, .. } => {
                 write!(
                     f,
                     "`var {name}` must be declared at the top level of the flow"
@@ -184,12 +207,18 @@ fn resolve_statements(
 
     for stmt in statements {
         let (action_name, kind) = match stmt {
-            Stmt::VarDecl { name, ty, value } => {
+            Stmt::VarDecl { name, name_span, ty, value } => {
                 if !top_level {
-                    return Err(ResolveError::NestedVarDeclaration { name: name.clone() });
+                    return Err(ResolveError::NestedVarDeclaration {
+                        name: name.clone(),
+                        span: *name_span,
+                    });
                 }
                 if env.contains_key(name) {
-                    return Err(ResolveError::DuplicateVariable { name: name.clone() });
+                    return Err(ResolveError::DuplicateVariable {
+                        name: name.clone(),
+                        span: *name_span,
+                    });
                 }
                 let value = resolve_expr(value, env)?;
                 env.insert(name.clone(), Binding::Var { ty: ty.clone() });
@@ -202,9 +231,12 @@ fn resolve_statements(
                 };
                 (action_name, kind)
             }
-            Stmt::Let { name, value } => {
+            Stmt::Let { name, name_span, value } => {
                 if env.contains_key(name) {
-                    return Err(ResolveError::DuplicateVariable { name: name.clone() });
+                    return Err(ResolveError::DuplicateVariable {
+                        name: name.clone(),
+                        span: *name_span,
+                    });
                 }
                 let value = resolve_expr(value, env)?;
                 let action_name = unique_name(&format!("Compose_{name}"), name_counts);
@@ -222,21 +254,25 @@ fn resolve_statements(
                     },
                 )
             }
-            Stmt::Assign { name, op, value } => {
+            Stmt::Assign { name, name_span, op, value } => {
                 let value = resolve_expr(value, env)?;
                 match env.get(name) {
                     Some(Binding::Var { ty }) => {
                         let ty = ty.clone();
-                        let (base, kind) = lower_assign(name, *op, &ty, value)?;
+                        let (base, kind) = lower_assign(name, *name_span, *op, &ty, value)?;
                         (unique_name(&base, name_counts), kind)
                     }
                     Some(Binding::Let { .. }) | Some(Binding::Iterator { .. }) => {
                         return Err(ResolveError::CannotAssignToImmutable {
                             name: name.clone(),
+                            span: *name_span,
                         });
                     }
                     None => {
-                        return Err(ResolveError::UndefinedVariable { name: name.clone() });
+                        return Err(ResolveError::UndefinedVariable {
+                            name: name.clone(),
+                            span: *name_span,
+                        });
                     }
                 }
             }
@@ -344,6 +380,7 @@ fn resolve_statements(
 
 fn lower_assign(
     name: &str,
+    name_span: Span,
     op: AssignOp,
     ty: &Type,
     value: Expr,
@@ -352,6 +389,7 @@ fn lower_assign(
         op,
         name: name.to_string(),
         ty: ty.clone(),
+        span: name_span,
     };
     match op {
         AssignOp::Set => Ok((
@@ -417,13 +455,16 @@ fn unique_name(base: &str, counts: &mut HashMap<String, u32>) -> String {
 fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, ResolveError> {
     match expr {
         Expr::Literal(l) => Ok(Expr::Literal(l.clone())),
-        Expr::Ref(name) => match env.get(name) {
+        Expr::Ref { name, span } => match env.get(name) {
             Some(Binding::Var { .. }) => Ok(Expr::VarRef(name.clone())),
             Some(Binding::Let { action_name }) => Ok(Expr::ComposeRef(action_name.clone())),
             Some(Binding::Iterator { action_name }) => {
                 Ok(Expr::IteratorRef(action_name.clone()))
             }
-            None => Err(ResolveError::UndefinedVariable { name: name.clone() }),
+            None => Err(ResolveError::UndefinedVariable {
+                name: name.clone(),
+                span: *span,
+            }),
         },
         Expr::Member { target, field } => {
             let resolved_target = resolve_expr(target, env)?;
@@ -465,9 +506,21 @@ mod tests {
     use super::*;
     use crate::ast::{Literal, Trigger, Type};
 
+    fn sp() -> Span {
+        (0..0).into()
+    }
+
+    fn rref(name: &str) -> Expr {
+        Expr::Ref {
+            name: name.to_string(),
+            span: sp(),
+        }
+    }
+
     fn var(name: &str) -> Stmt {
         Stmt::VarDecl {
             name: name.to_string(),
+            name_span: sp(),
             ty: Type::Int,
             value: Expr::Literal(Literal::Int(0)),
         }
@@ -476,6 +529,7 @@ mod tests {
     fn var_ty(name: &str, ty: Type) -> Stmt {
         Stmt::VarDecl {
             name: name.to_string(),
+            name_span: sp(),
             ty,
             value: Expr::Literal(Literal::Int(0)),
         }
@@ -484,6 +538,7 @@ mod tests {
     fn assign(name: &str, op: AssignOp, value: Expr) -> Stmt {
         Stmt::Assign {
             name: name.to_string(),
+            name_span: sp(),
             op,
             value,
         }
@@ -492,6 +547,7 @@ mod tests {
     fn let_stmt(name: &str, value: Expr) -> Stmt {
         Stmt::Let {
             name: name.to_string(),
+            name_span: sp(),
             value,
         }
     }
@@ -554,20 +610,19 @@ mod tests {
             trigger: Trigger::Manual,
             statements: vec![var("x"), var("x")],
         };
-        assert_eq!(
+        assert!(matches!(
             resolve(&prog).unwrap_err(),
-            ResolveError::DuplicateVariable {
-                name: "x".to_string()
-            }
-        );
+            ResolveError::DuplicateVariable { name, .. } if name == "x"
+        ));
     }
 
     #[test]
     fn accepts_valid_reference() {
         let ref_y = Stmt::VarDecl {
             name: "y".to_string(),
+            name_span: sp(),
             ty: Type::Int,
-            value: Expr::Ref("x".to_string()),
+            value: rref("x"),
         };
         let prog = Program {
             trigger: Trigger::Manual,
@@ -580,38 +635,36 @@ mod tests {
     fn rejects_undefined_reference() {
         let ref_y = Stmt::VarDecl {
             name: "y".to_string(),
+            name_span: sp(),
             ty: Type::Int,
-            value: Expr::Ref("nope".to_string()),
+            value: rref("nope"),
         };
         let prog = Program {
             trigger: Trigger::Manual,
             statements: vec![ref_y],
         };
-        assert_eq!(
+        assert!(matches!(
             resolve(&prog).unwrap_err(),
-            ResolveError::UndefinedVariable {
-                name: "nope".to_string()
-            }
-        );
+            ResolveError::UndefinedVariable { name, .. } if name == "nope"
+        ));
     }
 
     #[test]
     fn rejects_forward_reference() {
         let ref_y = Stmt::VarDecl {
             name: "y".to_string(),
+            name_span: sp(),
             ty: Type::Int,
-            value: Expr::Ref("x".to_string()),
+            value: rref("x"),
         };
         let prog = Program {
             trigger: Trigger::Manual,
             statements: vec![ref_y, var("x")],
         };
-        assert_eq!(
+        assert!(matches!(
             resolve(&prog).unwrap_err(),
-            ResolveError::UndefinedVariable {
-                name: "x".to_string()
-            }
-        );
+            ResolveError::UndefinedVariable { name, .. } if name == "x"
+        ));
     }
 
     #[test]
@@ -730,12 +783,10 @@ mod tests {
             trigger: Trigger::Manual,
             statements: vec![assign("nope", AssignOp::Set, Expr::Literal(Literal::Int(1)))],
         };
-        assert_eq!(
+        assert!(matches!(
             resolve(&prog).unwrap_err(),
-            ResolveError::UndefinedVariable {
-                name: "nope".to_string()
-            }
-        );
+            ResolveError::UndefinedVariable { name, .. } if name == "nope"
+        ));
     }
 
     #[test]
@@ -774,8 +825,9 @@ mod tests {
                 let_stmt("total", Expr::Literal(Literal::Int(10))),
                 Stmt::VarDecl {
                     name: "mirror".to_string(),
+                    name_span: sp(),
                     ty: Type::Int,
-                    value: Expr::Ref("total".to_string()),
+                    value: rref("total"),
                 },
             ],
         };
@@ -798,12 +850,10 @@ mod tests {
                 assign("immut", AssignOp::Set, Expr::Literal(Literal::Int(2))),
             ],
         };
-        assert_eq!(
+        assert!(matches!(
             resolve(&prog).unwrap_err(),
-            ResolveError::CannotAssignToImmutable {
-                name: "immut".to_string()
-            }
-        );
+            ResolveError::CannotAssignToImmutable { name, .. } if name == "immut"
+        ));
     }
 
     #[test]
@@ -813,19 +863,17 @@ mod tests {
             statements: vec![
                 var_ty("flag", Type::Bool),
                 Stmt::If {
-                    condition: Expr::Ref("flag".to_string()),
-                    condition_span: (0..0).into(),
+                    condition: rref("flag"),
+                    condition_span: sp(),
                     true_branch: vec![var("inner")],
                     false_branch: vec![],
                 },
             ],
         };
-        assert_eq!(
+        assert!(matches!(
             resolve(&prog).unwrap_err(),
-            ResolveError::NestedVarDeclaration {
-                name: "inner".to_string()
-            }
-        );
+            ResolveError::NestedVarDeclaration { name, .. } if name == "inner"
+        ));
     }
 
     #[test]
@@ -836,17 +884,15 @@ mod tests {
                 var_ty("items", Type::Array),
                 Stmt::Foreach {
                     iter: "x".to_string(),
-                    collection: Expr::Ref("items".to_string()),
+                    collection: rref("items"),
                     body: vec![var("inner")],
                 },
             ],
         };
-        assert_eq!(
+        assert!(matches!(
             resolve(&prog).unwrap_err(),
-            ResolveError::NestedVarDeclaration {
-                name: "inner".to_string()
-            }
-        );
+            ResolveError::NestedVarDeclaration { name, .. } if name == "inner"
+        ));
     }
 
     #[test]
@@ -856,8 +902,8 @@ mod tests {
             statements: vec![
                 var_ty("flag", Type::Bool),
                 Stmt::If {
-                    condition: Expr::Ref("flag".to_string()),
-                    condition_span: (0..0).into(),
+                    condition: rref("flag"),
+                    condition_span: sp(),
                     true_branch: vec![let_stmt(
                         "inner",
                         Expr::Literal(Literal::Int(1)),
@@ -866,15 +912,13 @@ mod tests {
                 },
                 // Reference `inner` from outer scope: should fail, because
                 // the `let` was scoped to the true branch.
-                let_stmt("leak", Expr::Ref("inner".to_string())),
+                let_stmt("leak", rref("inner")),
             ],
         };
-        assert_eq!(
+        assert!(matches!(
             resolve(&prog).unwrap_err(),
-            ResolveError::UndefinedVariable {
-                name: "inner".to_string()
-            }
-        );
+            ResolveError::UndefinedVariable { name, .. } if name == "inner"
+        ));
     }
 
     #[test]
@@ -884,25 +928,23 @@ mod tests {
             statements: vec![
                 var_ty("flag", Type::Bool),
                 Stmt::If {
-                    condition: Expr::Ref("flag".to_string()),
-                    condition_span: (0..0).into(),
+                    condition: rref("flag"),
+                    condition_span: sp(),
                     true_branch: vec![let_stmt(
                         "inner",
                         Expr::Literal(Literal::Int(1)),
                     )],
                     false_branch: vec![let_stmt(
                         "copy",
-                        Expr::Ref("inner".to_string()),
+                        rref("inner"),
                     )],
                 },
             ],
         };
-        assert_eq!(
+        assert!(matches!(
             resolve(&prog).unwrap_err(),
-            ResolveError::UndefinedVariable {
-                name: "inner".to_string()
-            }
-        );
+            ResolveError::UndefinedVariable { name, .. } if name == "inner"
+        ));
     }
 
     #[test]
@@ -913,21 +955,19 @@ mod tests {
                 var_ty("items", Type::Array),
                 Stmt::Foreach {
                     iter: "x".to_string(),
-                    collection: Expr::Ref("items".to_string()),
+                    collection: rref("items"),
                     body: vec![let_stmt(
                         "per_item",
                         Expr::Literal(Literal::Int(1)),
                     )],
                 },
-                let_stmt("leak", Expr::Ref("per_item".to_string())),
+                let_stmt("leak", rref("per_item")),
             ],
         };
-        assert_eq!(
+        assert!(matches!(
             resolve(&prog).unwrap_err(),
-            ResolveError::UndefinedVariable {
-                name: "per_item".to_string()
-            }
-        );
+            ResolveError::UndefinedVariable { name, .. } if name == "per_item"
+        ));
     }
 
     #[test]
@@ -940,10 +980,10 @@ mod tests {
                 var_ty("outer", Type::Int),
                 Stmt::If {
                     condition: Expr::Literal(Literal::Bool(true)),
-                    condition_span: (0..0).into(),
+                    condition_span: sp(),
                     true_branch: vec![let_stmt(
                         "copy",
-                        Expr::Ref("outer".to_string()),
+                        rref("outer"),
                     )],
                     false_branch: vec![],
                 },
@@ -961,11 +1001,9 @@ mod tests {
                 let_stmt("x", Expr::Literal(Literal::Int(1))),
             ],
         };
-        assert_eq!(
+        assert!(matches!(
             resolve(&prog).unwrap_err(),
-            ResolveError::DuplicateVariable {
-                name: "x".to_string()
-            }
-        );
+            ResolveError::DuplicateVariable { name, .. } if name == "x"
+        ));
     }
 }

@@ -10,6 +10,7 @@ keywords = ["power-automate", "dsl", "compiler", "logic-apps", "workflow"]
 categories = ["command-line-utilities", "compilers"]
 
 [dependencies]
+ariadne = "0.5"
 chumsky = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

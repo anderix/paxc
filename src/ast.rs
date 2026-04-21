@@ -30,11 +30,15 @@ pub enum Trigger {
 pub enum Stmt {
     VarDecl {
         name: String,
+        /// Span of the declared name identifier, used by diagnostics.
+        name_span: Span,
         ty: Type,
         value: Expr,
     },
     Assign {
         name: String,
+        /// Span of the assigned-to name identifier, used by diagnostics.
+        name_span: Span,
         op: AssignOp,
         value: Expr,
     },
@@ -44,6 +48,8 @@ pub enum Stmt {
     },
     Let {
         name: String,
+        /// Span of the bound name identifier, used by diagnostics.
+        name_span: Span,
         value: Expr,
     },
     If {
@@ -130,7 +136,7 @@ pub enum Expr {
     Literal(Literal),
     /// Unresolved identifier reference emitted by the parser. The resolver
     /// rewrites each occurrence into either `VarRef` or `ComposeRef`.
-    Ref(String),
+    Ref { name: String, span: Span },
     /// Reference to a pax variable. Emits `@{variables('x')}`.
     VarRef(String),
     /// Reference to a `let` binding. The payload is the Compose action key

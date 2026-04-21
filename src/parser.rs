@@ -72,6 +72,7 @@ where
     // chain from growing exponentially across layers.
     let expr = recursive(|expr| {
         let ident_s = select! { Token::Ident(s) => s.to_string() };
+        let ident_spanned = ident_s.clone().map_with(|name, e| (name, e.span()));
 
         // A call is an ident followed immediately by `(args)`. We parse the
         // `(args)` optionally and decide Call vs Ref at the seed stage so
@@ -83,10 +84,10 @@ where
             .collect::<Vec<Expr>>()
             .delimited_by(just(Token::LParen), just(Token::RParen));
 
-        let path_seed = ident_s.clone().then(call_args.or_not()).map(
-            |(name, maybe_args)| match maybe_args {
+        let path_seed = ident_spanned.then(call_args.or_not()).map(
+            |((name, span), maybe_args)| match maybe_args {
                 Some(args) => Expr::Call { name, args },
-                None => Expr::Ref(name),
+                None => Expr::Ref { name, span },
             },
         );
 
@@ -216,14 +217,17 @@ where
             .collect::<Vec<_>>()
             .delimited_by(just(Token::LBrace), just(Token::RBrace));
 
+        let name_spanned = name.map_with(|n, e| (n.to_string(), e.span()));
+
         let var_decl = just(Token::Var)
-            .ignore_then(name)
+            .ignore_then(name_spanned.clone())
             .then_ignore(just(Token::Colon))
             .then(ty)
             .then_ignore(just(Token::Eq))
             .then(expr.clone())
-            .map(|((name, ty), value)| Stmt::VarDecl {
-                name: name.to_string(),
+            .map(|(((name, name_span), ty), value)| Stmt::VarDecl {
+                name,
+                name_span,
                 ty,
                 value,
             });
@@ -235,11 +239,13 @@ where
             Token::AmpEq => AssignOp::Concat,
         };
 
-        let assign = name
+        let assign = name_spanned
+            .clone()
             .then(assign_op)
             .then(expr.clone())
-            .map(|((name, op), value)| Stmt::Assign {
-                name: name.to_string(),
+            .map(|(((name, name_span), op), value)| Stmt::Assign {
+                name,
+                name_span,
                 op,
                 value,
             });
@@ -250,11 +256,12 @@ where
             .map(|(name, body)| Stmt::Raw { name, body });
 
         let let_decl = just(Token::Let)
-            .ignore_then(name)
+            .ignore_then(name_spanned.clone())
             .then_ignore(just(Token::Eq))
             .then(expr.clone())
-            .map(|(name, value)| Stmt::Let {
-                name: name.to_string(),
+            .map(|((name, name_span), value)| Stmt::Let {
+                name,
+                name_span,
                 value,
             });
 
@@ -355,7 +362,7 @@ mod tests {
         let prog = parse("var counter: int = 1");
         assert_eq!(prog.statements.len(), 1);
         match &prog.statements[0] {
-            Stmt::VarDecl { name, ty, value } => {
+            Stmt::VarDecl { name, ty, value, .. } => {
                 assert_eq!(name, "counter");
                 assert!(matches!(ty, Type::Int));
                 assert!(matches!(value, Expr::Literal(Literal::Int(1))));
@@ -476,7 +483,7 @@ mod tests {
         let prog = parse("var x: int = 1\nx += 2");
         assert_eq!(prog.statements.len(), 2);
         match &prog.statements[1] {
-            Stmt::Assign { name, op, value } => {
+            Stmt::Assign { name, op, value, .. } => {
                 assert_eq!(name, "x");
                 assert!(matches!(op, AssignOp::Add));
                 assert!(matches!(value, Expr::Literal(Literal::Int(2))));

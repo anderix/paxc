@@ -5,6 +5,7 @@
 //! whitespace, and `//` line comments.
 
 use chumsky::prelude::*;
+use std::fmt;
 
 pub type Span = SimpleSpan;
 pub type Spanned<T> = (T, Span);
@@ -52,6 +53,54 @@ pub enum Token<'src> {
     RBrace,
     LParen,
     RParen,
+}
+
+impl fmt::Display for Token<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Token::Var => f.write_str("`var`"),
+            Token::Let => f.write_str("`let`"),
+            Token::If => f.write_str("`if`"),
+            Token::Else => f.write_str("`else`"),
+            Token::Foreach => f.write_str("`foreach`"),
+            Token::In => f.write_str("`in`"),
+            Token::Trigger => f.write_str("`trigger`"),
+            Token::Raw => f.write_str("`raw`"),
+            Token::Debug => f.write_str("`debug`"),
+            Token::Null => f.write_str("`null`"),
+            Token::Ident(s) => write!(f, "`{s}`"),
+            Token::Int(n) => write!(f, "`{n}`"),
+            Token::Str(s) => write!(f, "string \"{s}\""),
+            Token::Bool(b) => write!(f, "`{b}`"),
+            Token::Colon => f.write_str("`:`"),
+            Token::Eq => f.write_str("`=`"),
+            Token::PlusEq => f.write_str("`+=`"),
+            Token::MinusEq => f.write_str("`-=`"),
+            Token::AmpEq => f.write_str("`&=`"),
+            Token::Amp => f.write_str("`&`"),
+            Token::Plus => f.write_str("`+`"),
+            Token::Minus => f.write_str("`-`"),
+            Token::Star => f.write_str("`*`"),
+            Token::Slash => f.write_str("`/`"),
+            Token::Lt => f.write_str("`<`"),
+            Token::Gt => f.write_str("`>`"),
+            Token::Le => f.write_str("`<=`"),
+            Token::Ge => f.write_str("`>=`"),
+            Token::EqEq => f.write_str("`==`"),
+            Token::BangEq => f.write_str("`!=`"),
+            Token::AmpAmp => f.write_str("`&&`"),
+            Token::PipePipe => f.write_str("`||`"),
+            Token::Bang => f.write_str("`!`"),
+            Token::Comma => f.write_str("`,`"),
+            Token::Dot => f.write_str("`.`"),
+            Token::LBracket => f.write_str("`[`"),
+            Token::RBracket => f.write_str("`]`"),
+            Token::LBrace => f.write_str("`{`"),
+            Token::RBrace => f.write_str("`}`"),
+            Token::LParen => f.write_str("`(`"),
+            Token::RParen => f.write_str("`)`"),
+        }
+    }
 }
 
 pub fn lexer<'src>()

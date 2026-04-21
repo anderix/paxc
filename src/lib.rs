@@ -3,6 +3,7 @@
 //! This is the library crate. The binary entry point lives in `src/main.rs`.
 
 pub mod ast;
+pub mod diagnostic;
 pub mod emitter;
 pub mod interpreter;
 pub mod lexer;

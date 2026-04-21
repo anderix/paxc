@@ -6,7 +6,7 @@
 //! crate, sharing the lexer / parser / resolver via the library.
 
 use chumsky::prelude::*;
-use paxc::{interpreter, lexer, parser, resolver};
+use paxc::{diagnostic, interpreter, lexer, parser, resolver};
 use std::{env, fs, process};
 
 fn main() {
@@ -45,8 +45,8 @@ fn main() {
     let tokens = match lexer::lexer().parse(src.as_str()).into_result() {
         Ok(toks) => toks,
         Err(errs) => {
-            for e in errs {
-                eprintln!("lex error: {e}");
+            for e in &errs {
+                diagnostic::from_lex_error(e).report(path, &src);
             }
             process::exit(1);
         }
@@ -62,8 +62,8 @@ fn main() {
     {
         Ok(p) => p,
         Err(errs) => {
-            for e in errs {
-                eprintln!("parse error: {e:?}");
+            for e in &errs {
+                diagnostic::from_parse_error(e).report(path, &src);
             }
             process::exit(1);
         }
@@ -72,7 +72,7 @@ fn main() {
     let resolved = match resolver::resolve(&program) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("error: {e}");
+            diagnostic::from_resolve_error(&e).report(path, &src);
             process::exit(1);
         }
     };

@@ -220,7 +220,7 @@ fn pa_expr(expr: &Expr) -> String {
             let args_str: Vec<String> = args.iter().map(pa_expr).collect();
             format!("{}({})", name, args_str.join(", "))
         }
-        Expr::Ref(_) => {
+        Expr::Ref { .. } => {
             unreachable!("resolver should have rewritten Expr::Ref before emit")
         }
     }

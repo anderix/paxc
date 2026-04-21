@@ -408,7 +408,7 @@ impl<'src> Interpreter<'src> {
     fn eval(&mut self, expr: &Expr) -> Result<Value, InterpretError> {
         match expr {
             Expr::Literal(lit) => Ok(literal_to_value(lit)),
-            Expr::Ref(name) => Err(err(format!(
+            Expr::Ref { name, .. } => Err(err(format!(
                 "internal error: unresolved ref {name} reached interpreter"
             ))),
             Expr::VarRef(name) => self

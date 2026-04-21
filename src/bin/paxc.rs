@@ -1,5 +1,5 @@
 use chumsky::prelude::*;
-use paxc::{emitter, lexer, packager, parser, resolver};
+use paxc::{diagnostic, emitter, lexer, packager, parser, resolver};
 use std::path::{Path, PathBuf};
 use std::{env, fs, process};
 
@@ -82,8 +82,8 @@ fn main() {
     let tokens = match lexer::lexer().parse(src.as_str()).into_result() {
         Ok(toks) => toks,
         Err(errs) => {
-            for e in errs {
-                eprintln!("lex error: {e}");
+            for e in &errs {
+                diagnostic::from_lex_error(e).report(&args.path, &src);
             }
             process::exit(1);
         }
@@ -99,8 +99,8 @@ fn main() {
     {
         Ok(p) => p,
         Err(errs) => {
-            for e in errs {
-                eprintln!("parse error: {e:?}");
+            for e in &errs {
+                diagnostic::from_parse_error(e).report(&args.path, &src);
             }
             process::exit(1);
         }
@@ -109,7 +109,7 @@ fn main() {
     let resolved = match resolver::resolve(&program) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("error: {e}");
+            diagnostic::from_resolve_error(&e).report(&args.path, &src);
             process::exit(1);
         }
     };
