@@ -26,9 +26,38 @@ pub fn emit(program: &ResolvedProgram) -> Value {
 fn build_actions_map(actions: &[ResolvedAction]) -> Value {
     let mut map = Map::new();
     for action in actions {
+        // Debug statements are diagnostic-only. paxc drops them from the
+        // emitted PA flow; `count_debug_actions` reports them separately.
+        if matches!(action.kind, ActionKind::Debug { .. }) {
+            continue;
+        }
         map.insert(action.name.clone(), emit_action(action));
     }
     Value::Object(map)
+}
+
+/// Recursively counts `debug()` statements in a resolved program so paxc can
+/// emit the end-of-compile note telling the user how many were dropped.
+pub fn count_debug_actions(actions: &[ResolvedAction]) -> usize {
+    let mut n = 0;
+    for action in actions {
+        match &action.kind {
+            ActionKind::Debug { .. } => n += 1,
+            ActionKind::Condition {
+                true_branch,
+                false_branch,
+                ..
+            } => {
+                n += count_debug_actions(true_branch);
+                n += count_debug_actions(false_branch);
+            }
+            ActionKind::Foreach { body, .. } => {
+                n += count_debug_actions(body);
+            }
+            _ => {}
+        }
+    }
+    n
 }
 
 fn emit_trigger(trigger: &Trigger) -> Value {
@@ -67,6 +96,10 @@ fn emit_action(action: &ResolvedAction) -> Value {
             false_branch,
         } => emit_condition(condition, true_branch, false_branch),
         ActionKind::Foreach { collection, body } => emit_foreach(collection, body),
+        ActionKind::Debug { .. } => {
+            // Filtered out in `build_actions_map` before reaching here.
+            unreachable!("debug action reached emitter");
+        }
     };
     splice_run_after(body, &action.run_after)
 }

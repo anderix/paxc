@@ -3,7 +3,7 @@
 //! Slice 1 recognizes a sequence of `var <ident>: <type> = <literal>`
 //! declarations and builds a `Program` AST.
 
-use crate::ast::{AssignOp, BinOp, Expr, Literal, Program, Stmt, Trigger, Type, UnaryOp};
+use crate::ast::{AssignOp, BinOp, DebugArg, Expr, Literal, Program, Stmt, Trigger, Type, UnaryOp};
 use crate::lexer::{Span, Token};
 use chumsky::{input::ValueInput, prelude::*};
 
@@ -289,11 +289,28 @@ where
                 body,
             });
 
+        // `debug(args)` -- each arg keeps its source span so paxr can
+        // auto-label with the exact source slice the user wrote.
+        let debug_arg = expr
+            .clone()
+            .map_with(|expr, e| DebugArg { expr, span: e.span() });
+
+        let debug_stmt = just(Token::Debug)
+            .ignore_then(
+                debug_arg
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map_with(|args, e| Stmt::Debug { args, span: e.span() });
+
         var_decl
             .or(let_decl)
             .or(if_stmt)
             .or(foreach_stmt)
             .or(raw_stmt)
+            .or(debug_stmt)
             .or(assign)
     });
 
@@ -382,6 +399,49 @@ mod tests {
             result.has_errors(),
             "chained comparisons should not parse"
         );
+    }
+
+    #[test]
+    fn slice20_debug_parses() {
+        let prog = parse("var x: int = 1\ndebug()\ndebug(x)\ndebug(x, x + 1)");
+        assert_eq!(prog.statements.len(), 4);
+        match &prog.statements[1] {
+            Stmt::Debug { args, .. } => assert_eq!(args.len(), 0),
+            _ => panic!("expected debug breadcrumb"),
+        }
+        match &prog.statements[2] {
+            Stmt::Debug { args, .. } => assert_eq!(args.len(), 1),
+            _ => panic!("expected debug(x)"),
+        }
+        match &prog.statements[3] {
+            Stmt::Debug { args, .. } => assert_eq!(args.len(), 2),
+            _ => panic!("expected debug(x, x+1)"),
+        }
+    }
+
+    #[test]
+    fn slice20_debug_arg_span_covers_source_slice() {
+        // Per-arg spans let paxr show `total - completed=<value>` rather
+        // than just the evaluated number.
+        let src = "trigger manual\nvar total: int = 0\nvar completed: int = 0\ndebug(total - completed)";
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        let prog = parser()
+            .parse(
+                tokens
+                    .as_slice()
+                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+            )
+            .into_result()
+            .expect("parse failed");
+        match &prog.statements[2] {
+            Stmt::Debug { args, .. } => {
+                assert_eq!(args.len(), 1);
+                let span = args[0].span;
+                let slice = &src[span.start..span.end];
+                assert_eq!(slice, "total - completed");
+            }
+            _ => panic!("expected debug"),
+        }
     }
 
     #[test]

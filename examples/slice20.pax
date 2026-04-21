@@ -1,0 +1,36 @@
+// Slice 20: debug() statement.
+//
+// debug() is a paxr-only diagnostic. paxc drops every debug call from the
+// emitted flow and prints an end-of-compile note: "note: dropped N debug()
+// statement(s)". Forms exercised below: breadcrumb (no args), single arg
+// auto-labeled with its source slice, multi-arg one-line output, nested
+// inside control flow.
+
+trigger manual
+
+var total: int = 0
+var completed: int = 0
+
+debug()
+
+total = 10
+debug(total)
+
+completed = 7
+debug(total, completed)
+
+let remaining = total - completed
+debug(remaining, total - completed)
+
+var tasks: array = [
+  { "title": "a", "done": true  },
+  { "title": "b", "done": false },
+]
+
+foreach task in tasks {
+  debug(task.title, task.done)
+  if task.done {
+    completed += 1
+    debug(completed)
+  }
+}

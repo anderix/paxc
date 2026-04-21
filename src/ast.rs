@@ -4,10 +4,21 @@
 //! integer literal. Additional variants (more types, expressions, control
 //! flow) are added slice by slice.
 
+use crate::lexer::Span;
+
 #[derive(Debug, Clone)]
 pub struct Program {
     pub trigger: Trigger,
     pub statements: Vec<Stmt>,
+}
+
+/// One argument to a `debug(...)` statement. Carries the expression itself
+/// plus the source span so paxr can show the arg in `name=value` form using
+/// the literal source slice as the name.
+#[derive(Debug, Clone)]
+pub struct DebugArg {
+    pub expr: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +55,13 @@ pub enum Stmt {
         iter: String,
         collection: Expr,
         body: Vec<Stmt>,
+    },
+    /// `debug(args)` diagnostic. paxc drops these with an end-of-compile note;
+    /// paxr evaluates them and prints `debug: <source>=value at line X`. The
+    /// span covers the whole statement so paxr can recover the line number.
+    Debug {
+        args: Vec<DebugArg>,
+        span: Span,
     },
 }
 

@@ -11,7 +11,8 @@
 //! variable) or `Expr::ComposeRef` (pointing at a `let` binding's Compose
 //! action key), so the emitter never sees an unresolved reference.
 
-use crate::ast::{AssignOp, Expr, Literal, Program, Stmt, Trigger, Type};
+use crate::ast::{AssignOp, DebugArg, Expr, Literal, Program, Stmt, Trigger, Type};
+use crate::lexer::Span;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -69,6 +70,12 @@ pub enum ActionKind {
     Foreach {
         collection: Expr,
         body: Vec<ResolvedAction>,
+    },
+    /// `debug(args)` diagnostic. paxc skips these at emit time and counts
+    /// them for the end-of-compile note. paxr evaluates them and prints.
+    Debug {
+        args: Vec<DebugArg>,
+        span: Span,
     },
 }
 
@@ -272,7 +279,33 @@ fn resolve_statements(
                     },
                 )
             }
+            Stmt::Debug { args, span } => {
+                let mut resolved_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    let expr = resolve_expr(&arg.expr, env)?;
+                    resolved_args.push(DebugArg { expr, span: arg.span });
+                }
+                (
+                    String::new(),
+                    ActionKind::Debug {
+                        args: resolved_args,
+                        span: *span,
+                    },
+                )
+            }
         };
+
+        // Debug actions are diagnostic-only: paxc drops them, and real
+        // actions after a debug must chain runAfter back to the last real
+        // action, so we skip updating prev_name here.
+        if matches!(&kind, ActionKind::Debug { .. }) {
+            actions.push(ResolvedAction {
+                name: action_name,
+                run_after: Vec::new(),
+                kind,
+            });
+            continue;
+        }
 
         let run_after = match &prev_name {
             Some(n) => vec![n.clone()],
@@ -441,6 +474,42 @@ mod tests {
             name: name.to_string(),
             value,
         }
+    }
+
+    fn debug(args: Vec<Expr>) -> Stmt {
+        Stmt::Debug {
+            args: args
+                .into_iter()
+                .map(|expr| DebugArg {
+                    expr,
+                    span: (0..0).into(),
+                })
+                .collect(),
+            span: (0..0).into(),
+        }
+    }
+
+    #[test]
+    fn slice20_debug_does_not_chain_run_after() {
+        // var a; debug(); var b --  b.runAfter must point at a, not at debug.
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![var("a"), debug(vec![]), var("b")],
+        };
+        let resolved = resolve(&prog).expect("resolve should succeed");
+        assert_eq!(resolved.actions.len(), 3);
+        assert_eq!(resolved.actions[0].name, "Initialize_a");
+        assert!(matches!(resolved.actions[1].kind, ActionKind::Debug { .. }));
+        assert!(
+            resolved.actions[1].run_after.is_empty(),
+            "debug action should have empty runAfter"
+        );
+        assert_eq!(resolved.actions[2].name, "Initialize_b");
+        assert_eq!(
+            resolved.actions[2].run_after,
+            vec!["Initialize_a"],
+            "action after debug must chain back to prior real action"
+        );
     }
 
     #[test]

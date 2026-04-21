@@ -54,4 +54,10 @@ fn main() {
 
     let json = emitter::emit(&resolved);
     println!("{}", serde_json::to_string_pretty(&json).unwrap());
+
+    let dropped = emitter::count_debug_actions(&resolved.actions);
+    if dropped > 0 {
+        let plural = if dropped == 1 { "" } else { "s" };
+        eprintln!("note: dropped {dropped} debug() statement{plural}");
+    }
 }
