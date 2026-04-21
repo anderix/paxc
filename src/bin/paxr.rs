@@ -91,6 +91,11 @@ fn main() {
     };
 
     if !quiet && !debug_only {
-        print!("{}", interpreter::format_state_dump(&state));
+        let dump = interpreter::format_state_dump(&state);
+        if !dump.is_empty() {
+            println!();
+            println!("end state:");
+            print!("{}", dump);
+        }
     }
 }
