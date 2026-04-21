@@ -20,7 +20,8 @@ where
         Token::Ident("bool") => Type::Bool,
         Token::Ident("array") => Type::Array,
         Token::Ident("object") => Type::Object,
-    };
+    }
+    .labelled("type name (int, string, bool, array, or object)");
 
     let literal = recursive(|literal| {
         let scalar = select! {
@@ -237,7 +238,8 @@ where
             Token::PlusEq => AssignOp::Add,
             Token::MinusEq => AssignOp::Subtract,
             Token::AmpEq => AssignOp::Concat,
-        };
+        }
+        .labelled("assignment operator");
 
         let assign = name_spanned
             .clone()
