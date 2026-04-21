@@ -13,6 +13,8 @@ categories = ["command-line-utilities", "compilers"]
 chumsky = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+uuid = { version = "1", features = ["v4"] }
 
 [lib]
 name = "paxc"
