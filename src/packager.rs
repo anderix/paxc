@@ -205,10 +205,10 @@ fn lowercase_var_types(actions: &mut Value) {
                     .and_then(|v| v.as_array_mut())
                 {
                     for var in vars {
-                        if let Some(ty) = var.get_mut("type") {
-                            if let Some(s) = ty.as_str() {
-                                *ty = Value::String(s.to_lowercase());
-                            }
+                        if let Some(ty) = var.get_mut("type")
+                            && let Some(s) = ty.as_str()
+                        {
+                            *ty = Value::String(s.to_lowercase());
                         }
                     }
                 }

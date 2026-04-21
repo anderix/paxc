@@ -643,12 +643,11 @@ fn eval_call(name: &str, args: Vec<Value>) -> (Value, bool) {
         "sub" => binary_int(&args, i64::wrapping_sub),
         "mul" => binary_int(&args, i64::wrapping_mul),
         "div" => {
-            if args.len() == 2 {
-                if let (Some(a), Some(b)) = (args[0].as_int(), args[1].as_int()) {
-                    if b != 0 {
-                        return (Value::Int(a / b), false);
-                    }
-                }
+            if args.len() == 2
+                && let (Some(a), Some(b)) = (args[0].as_int(), args[1].as_int())
+                && b != 0
+            {
+                return (Value::Int(a / b), false);
             }
             return (Value::Null, false);
         }
@@ -676,28 +675,28 @@ fn eval_call(name: &str, args: Vec<Value>) -> (Value, bool) {
 }
 
 fn binary_int<F: Fn(i64, i64) -> i64>(args: &[Value], f: F) -> Value {
-    if args.len() == 2 {
-        if let (Some(a), Some(b)) = (args[0].as_int(), args[1].as_int()) {
-            return Value::Int(f(a, b));
-        }
+    if args.len() == 2
+        && let (Some(a), Some(b)) = (args[0].as_int(), args[1].as_int())
+    {
+        return Value::Int(f(a, b));
     }
     Value::Null
 }
 
 fn binary_cmp<F: Fn(i64, i64) -> bool>(args: &[Value], f: F) -> Value {
-    if args.len() == 2 {
-        if let (Some(a), Some(b)) = (args[0].as_int(), args[1].as_int()) {
-            return Value::Bool(f(a, b));
-        }
+    if args.len() == 2
+        && let (Some(a), Some(b)) = (args[0].as_int(), args[1].as_int())
+    {
+        return Value::Bool(f(a, b));
     }
     Value::Null
 }
 
 fn binary_bool<F: Fn(bool, bool) -> bool>(args: &[Value], f: F) -> Value {
-    if args.len() == 2 {
-        if let (Some(a), Some(b)) = (args[0].as_bool(), args[1].as_bool()) {
-            return Value::Bool(f(a, b));
-        }
+    if args.len() == 2
+        && let (Some(a), Some(b)) = (args[0].as_bool(), args[1].as_bool())
+    {
+        return Value::Bool(f(a, b));
     }
     Value::Null
 }
@@ -743,6 +742,20 @@ mod tests {
     fn division_by_zero_errors() {
         let e = run("var x: int = 1\nlet y = x / 0").unwrap_err();
         assert!(e.message.contains("division by zero"));
+        // Span-decoration invariant: spanless runtime errors inherit the
+        // current action's span on their way out through `run_action`, so
+        // the error always points at some source location for diagnostics.
+        assert!(
+            e.span.is_some(),
+            "runtime error should carry a span for diagnostic attribution"
+        );
+    }
+
+    #[test]
+    fn foreach_type_mismatch_carries_span() {
+        let e = run("var n: int = 5\nforeach x in n { }").unwrap_err();
+        assert!(e.message.contains("foreach requires an array"));
+        assert!(e.span.is_some());
     }
 
     #[test]

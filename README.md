@@ -38,11 +38,21 @@ The source is shorter, and more importantly, the `runAfter` dependency graph is 
 
 The language supports manual triggers, typed variables and Compose bindings, assignment and compound assignment, arithmetic and boolean expressions, string concatenation, member access, `if`/`else if`/`else` and `foreach` control flow, function calls that pass through to Power Automate's expression language, a `raw` escape hatch for anything pax doesn't model natively (including all connector actions), and a `debug()` statement that paxr prints at runtime and paxc strips at compile time.
 
-## Building
+## Installing
 
-Requires Rust (edition 2024, toolchain 1.85+).
+Requires Rust (edition 2024, toolchain 1.85+). If you don't have Rust, install it first via [rustup](https://rustup.rs).
 
 ```sh
+cargo install --git https://github.com/anderix/paxc
+```
+
+This builds both `paxc` and `paxr` and places them in `~/.cargo/bin/`, which should already be on your `PATH` after a standard rustup install.
+
+## Building from source
+
+```sh
+git clone https://github.com/anderix/paxc
+cd paxc
 cargo build --release
 ```
 

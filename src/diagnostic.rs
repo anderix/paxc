@@ -97,12 +97,12 @@ pub fn from_interpret_error(err: &crate::interpreter::InterpretError) -> Diagnos
 /// to call it?" hint when an undefined name matches a known function.
 pub fn from_resolve_error(err: &crate::resolver::ResolveError) -> Diagnostic {
     let diag = Diagnostic::spanned(format!("{err}"), err.span(), err.label());
-    if let crate::resolver::ResolveError::UndefinedVariable { name, .. } = err {
-        if is_known_function(name) {
-            return diag.with_note(format!(
-                "`{name}` is a function -- did you mean to call it? try `{name}(...)`"
-            ));
-        }
+    if let crate::resolver::ResolveError::UndefinedVariable { name, .. } = err
+        && is_known_function(name)
+    {
+        return diag.with_note(format!(
+            "`{name}` is a function -- did you mean to call it? try `{name}(...)`"
+        ));
     }
     diag
 }
@@ -110,7 +110,10 @@ pub fn from_resolve_error(err: &crate::resolver::ResolveError) -> Diagnostic {
 /// Whether a name matches a function paxr implements or a common PA
 /// expression function. Conservative list: add only names that are clearly
 /// function-shaped in PA land, to avoid false "did you mean" prompts on
-/// plain identifier typos.
+/// plain identifier typos. Pax type keywords (`int`, `string`, `bool`,
+/// `array`, `object`) are intentionally excluded -- they are not callable
+/// PA functions and users commonly write identifiers adjacent to those
+/// words.
 fn is_known_function(name: &str) -> bool {
     matches!(
         name,
@@ -128,7 +131,6 @@ fn is_known_function(name: &str) -> bool {
         | "indexOf" | "lastIndexOf" | "substring" | "replace"
         | "toLower" | "toUpper" | "trim" | "split"
         | "utcNow" | "formatDateTime"
-        | "int" | "string" | "bool" | "float" | "array"
     )
 }
 
@@ -193,6 +195,45 @@ fn join_alternatives(items: &[String]) -> String {
         _ => {
             let (last, rest) = items.split_last().unwrap();
             format!("one of {}, or {}", rest.join(", "), last)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resolver::ResolveError;
+
+    #[test]
+    fn function_hint_fires_on_known_function_name() {
+        let err = ResolveError::UndefinedVariable {
+            name: "concat".to_string(),
+            span: (0..0).into(),
+        };
+        let diag = from_resolve_error(&err);
+        assert_eq!(diag.notes.len(), 1);
+        assert!(diag.notes[0].contains("is a function"));
+        assert!(diag.notes[0].contains("concat(...)"));
+    }
+
+    #[test]
+    fn function_hint_silent_on_plain_typo() {
+        let err = ResolveError::UndefinedVariable {
+            name: "custmer_name".to_string(),
+            span: (0..0).into(),
+        };
+        let diag = from_resolve_error(&err);
+        assert!(diag.notes.is_empty());
+    }
+
+    #[test]
+    fn function_hint_skips_type_keywords() {
+        // Pax types are not PA functions; the hint would be misleading.
+        for type_name in ["int", "string", "bool", "array", "object"] {
+            assert!(
+                !is_known_function(type_name),
+                "type keyword `{type_name}` must not trigger function hint"
+            );
         }
     }
 }

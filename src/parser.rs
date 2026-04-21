@@ -73,7 +73,7 @@ where
     // chain from growing exponentially across layers.
     let expr = recursive(|expr| {
         let ident_s = select! { Token::Ident(s) => s.to_string() };
-        let ident_spanned = ident_s.clone().map_with(|name, e| (name, e.span()));
+        let ident_spanned = ident_s.map_with(|name, e| (name, e.span()));
 
         // A call is an ident followed immediately by `(args)`. We parse the
         // `(args)` optionally and decide Call vs Ref at the seed stage so
@@ -221,7 +221,7 @@ where
         let name_spanned = name.map_with(|n, e| (n.to_string(), e.span()));
 
         let var_decl = just(Token::Var)
-            .ignore_then(name_spanned.clone())
+            .ignore_then(name_spanned)
             .then_ignore(just(Token::Colon))
             .then(ty)
             .then_ignore(just(Token::Eq))
@@ -242,7 +242,6 @@ where
         .labelled("assignment operator");
 
         let assign = name_spanned
-            .clone()
             .then(assign_op)
             .then(expr.clone())
             .map(|(((name, name_span), op), value)| Stmt::Assign {
@@ -258,7 +257,7 @@ where
             .map_with(|(name, body), e| Stmt::Raw { name, body, span: e.span() });
 
         let let_decl = just(Token::Let)
-            .ignore_then(name_spanned.clone())
+            .ignore_then(name_spanned)
             .then_ignore(just(Token::Eq))
             .then(expr.clone())
             .map(|((name, name_span), value)| Stmt::Let {
