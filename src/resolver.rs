@@ -57,6 +57,10 @@ pub enum ActionKind {
         value: Expr,
     },
     Compose {
+        /// The original user-facing `let` binding name. paxr uses this for
+        /// the state dump; the emitter keys actions by `ResolvedAction.name`,
+        /// which may differ (e.g. `Compose_remaining_1` when suffixed).
+        name: String,
         value: Expr,
     },
     Raw {
@@ -203,7 +207,13 @@ fn resolve_statements(
                         action_name: action_name.clone(),
                     },
                 );
-                (action_name, ActionKind::Compose { value })
+                (
+                    action_name,
+                    ActionKind::Compose {
+                        name: name.clone(),
+                        value,
+                    },
+                )
             }
             Stmt::Assign { name, op, value } => {
                 let value = resolve_expr(value, env)?;

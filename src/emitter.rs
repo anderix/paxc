@@ -88,7 +88,7 @@ fn emit_action(action: &ResolvedAction) -> Value {
         ActionKind::AppendToArrayVariable { var, value } => {
             emit_mutation("AppendToArrayVariable", var, value)
         }
-        ActionKind::Compose { value } => emit_compose(value),
+        ActionKind::Compose { value, .. } => emit_compose(value),
         ActionKind::Raw { body } => emit_raw(body),
         ActionKind::Condition {
             condition,

@@ -59,8 +59,13 @@ fn main() {
         }
     };
 
-    if let Err(e) = interpreter::interpret(&src, &resolved) {
-        eprintln!("runtime error: {e}");
-        process::exit(1);
-    }
+    let state = match interpreter::interpret(&src, &resolved) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("runtime error: {e}");
+            process::exit(1);
+        }
+    };
+
+    print!("{}", interpreter::format_state_dump(&state));
 }

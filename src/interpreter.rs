@@ -13,7 +13,7 @@
 //! to `Null`. This keeps the interpreter focused and avoids reimplementing
 //! PA's 200+ expression functions.
 
-use crate::ast::{BinOp, DebugArg, Expr, Literal, UnaryOp};
+use crate::ast::{BinOp, DebugArg, Expr, Literal, Type, UnaryOp};
 use crate::lexer::Span;
 use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram};
 use serde_json::{Map, Value as JsonValue, json};
@@ -101,10 +101,46 @@ fn err(msg: impl Into<String>) -> InterpretError {
     }
 }
 
-pub fn interpret(src: &str, program: &ResolvedProgram) -> Result<(), InterpretError> {
+pub fn interpret(src: &str, program: &ResolvedProgram) -> Result<FinalState, InterpretError> {
     let mut interp = Interpreter::new(src);
-    interp.run_actions(&program.actions)?;
-    Ok(())
+    interp.run_actions(&program.actions, true)?;
+    Ok(FinalState {
+        bindings: interp.bindings,
+        vars: interp.vars,
+        compose_outputs: interp.compose_outputs,
+    })
+}
+
+/// Snapshot of the interpreter at end-of-run. `bindings` preserves source
+/// declaration order so paxr can print the state dump top-to-bottom.
+#[derive(Debug, Clone)]
+pub struct FinalState {
+    pub bindings: Vec<Binding>,
+    pub vars: HashMap<String, Value>,
+    pub compose_outputs: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Binding {
+    /// User-facing name used in the state dump.
+    pub name: String,
+    pub kind: BindingKind,
+    /// Where to look the current value up in `FinalState`.
+    pub lookup: BindingLookup,
+}
+
+#[derive(Debug, Clone)]
+pub enum BindingKind {
+    Var(Type),
+    Let,
+}
+
+#[derive(Debug, Clone)]
+pub enum BindingLookup {
+    /// Look up in `FinalState.vars` by var name.
+    Var(String),
+    /// Look up in `FinalState.compose_outputs` by action name.
+    Compose(String),
 }
 
 struct Interpreter<'src> {
@@ -114,6 +150,10 @@ struct Interpreter<'src> {
     compose_outputs: HashMap<String, Value>,
     /// Keyed by Apply_to_each action name -> current iterator element.
     iterators: HashMap<String, Value>,
+    /// Top-level var + let bindings in source order. Bindings declared
+    /// inside `if` or `foreach` bodies are scoped to those branches and
+    /// do not land in the end-of-run state dump.
+    bindings: Vec<Binding>,
 }
 
 impl<'src> Interpreter<'src> {
@@ -123,21 +163,39 @@ impl<'src> Interpreter<'src> {
             vars: HashMap::new(),
             compose_outputs: HashMap::new(),
             iterators: HashMap::new(),
+            bindings: Vec::new(),
         }
     }
 
-    fn run_actions(&mut self, actions: &[ResolvedAction]) -> Result<(), InterpretError> {
+    fn run_actions(
+        &mut self,
+        actions: &[ResolvedAction],
+        top_level: bool,
+    ) -> Result<(), InterpretError> {
         for action in actions {
-            self.run_action(action)?;
+            self.run_action(action, top_level)?;
         }
         Ok(())
     }
 
-    fn run_action(&mut self, action: &ResolvedAction) -> Result<(), InterpretError> {
+    fn run_action(
+        &mut self,
+        action: &ResolvedAction,
+        top_level: bool,
+    ) -> Result<(), InterpretError> {
         match &action.kind {
-            ActionKind::InitializeVariable { var, value, .. } => {
+            ActionKind::InitializeVariable { var, ty, value } => {
                 let v = self.eval(value)?;
                 self.vars.insert(var.clone(), v);
+                // Resolver already enforces var decls are top-level, but
+                // guard anyway -- the interpreter doesn't need to know why.
+                if top_level {
+                    self.bindings.push(Binding {
+                        name: var.clone(),
+                        kind: BindingKind::Var(ty.clone()),
+                        lookup: BindingLookup::Var(var.clone()),
+                    });
+                }
             }
             ActionKind::SetVariable { var, value } => {
                 let v = self.eval(value)?;
@@ -182,9 +240,16 @@ impl<'src> Interpreter<'src> {
                 arr.push(item);
                 self.vars.insert(var.clone(), Value::Array(arr));
             }
-            ActionKind::Compose { value } => {
+            ActionKind::Compose { name, value } => {
                 let v = self.eval(value)?;
                 self.compose_outputs.insert(action.name.clone(), v);
+                if top_level {
+                    self.bindings.push(Binding {
+                        name: name.clone(),
+                        kind: BindingKind::Let,
+                        lookup: BindingLookup::Compose(action.name.clone()),
+                    });
+                }
             }
             ActionKind::Raw { .. } => {
                 // paxr does not execute raw blocks. Surface the skip so the
@@ -199,7 +264,7 @@ impl<'src> Interpreter<'src> {
             } => {
                 let taken = self.eval(condition)?.as_bool().unwrap_or(false);
                 let branch = if taken { true_branch } else { false_branch };
-                self.run_actions(branch)?;
+                self.run_actions(branch, false)?;
             }
             ActionKind::Foreach { collection, body } => {
                 let items = match self.eval(collection)? {
@@ -208,7 +273,7 @@ impl<'src> Interpreter<'src> {
                 };
                 for item in items {
                     self.iterators.insert(action.name.clone(), item);
-                    self.run_actions(body)?;
+                    self.run_actions(body, false)?;
                 }
                 self.iterators.remove(&action.name);
             }
@@ -284,6 +349,50 @@ impl<'src> Interpreter<'src> {
                 Ok(eval_call(name, vals))
             }
         }
+    }
+}
+
+/// Renders `FinalState.bindings` in source declaration order, one line per
+/// scalar binding and multi-line pretty JSON for non-empty composites.
+/// Empty arrays / objects are rendered inline as `[]` / `{}`.
+pub fn format_state_dump(state: &FinalState) -> String {
+    let mut out = String::new();
+    for binding in &state.bindings {
+        let value = match &binding.lookup {
+            BindingLookup::Var(name) => state.vars.get(name),
+            BindingLookup::Compose(key) => state.compose_outputs.get(key),
+        };
+        let Some(value) = value else {
+            continue;
+        };
+        let kind_s = match &binding.kind {
+            BindingKind::Var(ty) => format!("var {}", type_name(ty)),
+            BindingKind::Let => "let".to_string(),
+        };
+        let rendered = render_for_dump(value);
+        out.push_str(&format!("{} ({}) = {}\n", binding.name, kind_s, rendered));
+    }
+    out
+}
+
+fn type_name(ty: &Type) -> &'static str {
+    match ty {
+        Type::Int => "int",
+        Type::String => "string",
+        Type::Bool => "bool",
+        Type::Array => "array",
+        Type::Object => "object",
+    }
+}
+
+fn render_for_dump(v: &Value) -> String {
+    match v {
+        Value::Array(items) if items.is_empty() => "[]".to_string(),
+        Value::Object(entries) if entries.is_empty() => "{}".to_string(),
+        Value::Array(_) | Value::Object(_) => {
+            serde_json::to_string_pretty(&v.to_json()).unwrap_or_default()
+        }
+        _ => v.display_compact(),
     }
 }
 
@@ -469,7 +578,7 @@ mod tests {
     use crate::{lexer, parser, resolver};
     use chumsky::prelude::*;
 
-    fn run(src: &str) -> Result<(), InterpretError> {
+    fn run(src: &str) -> Result<FinalState, InterpretError> {
         let full = format!("trigger manual\n{src}");
         let tokens = lexer::lexer().parse(full.as_str()).into_result().unwrap();
         let program = parser::parser()
@@ -505,5 +614,46 @@ mod tests {
     fn unknown_call_returns_null_without_aborting() {
         // length() is not in the compiler-synthesized set.
         run(r#"let x = length("hi")"#).unwrap();
+    }
+
+    #[test]
+    fn slice22_state_dump_preserves_source_order() {
+        let state = run(
+            "var total: int = 0\nvar label: string = \"start\"\ntotal = 5\nlet doubled = total + total",
+        )
+        .unwrap();
+        let dump = format_state_dump(&state);
+        // One line per binding, in declaration order.
+        let lines: Vec<&str> = dump.trim_end().split('\n').collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "total (var int) = 5");
+        assert_eq!(lines[1], "label (var string) = \"start\"");
+        assert_eq!(lines[2], "doubled (let) = 10");
+    }
+
+    #[test]
+    fn slice22_state_dump_excludes_nested_lets() {
+        // `let inner = ...` inside the if-branch must not appear in the
+        // top-level state dump.
+        let state = run(
+            "var x: int = 1\nif x == 1 {\n  let inner = 99\n}\nlet outer = x",
+        )
+        .unwrap();
+        let dump = format_state_dump(&state);
+        assert!(!dump.contains("inner"), "nested let leaked into dump:\n{dump}");
+        assert!(dump.contains("outer (let) = 1"), "missing outer binding:\n{dump}");
+    }
+
+    #[test]
+    fn slice22_state_dump_renders_composites_as_pretty_json() {
+        let state = run(
+            "var empty_arr: array = []\nvar obj: object = { \"a\": 1 }",
+        )
+        .unwrap();
+        let dump = format_state_dump(&state);
+        // Empty composites inline.
+        assert!(dump.contains("empty_arr (var array) = []"));
+        // Non-empty composites pretty-printed on multiple lines.
+        assert!(dump.contains("obj (var object) = {\n  \"a\": 1\n}"));
     }
 }
