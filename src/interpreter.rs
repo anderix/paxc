@@ -107,6 +107,10 @@ pub struct Config {
     /// When true, emit an action-by-action trace to stdout as the interpreter
     /// walks the resolved program.
     pub verbose: bool,
+    /// When true, suppress all stdout output -- including debug() calls,
+    /// raw / unknown-call skip notices, and the end-of-run state dump. Used
+    /// for scripted / CI runs that only care about exit code.
+    pub quiet: bool,
 }
 
 pub fn interpret(src: &str, program: &ResolvedProgram) -> Result<FinalState, InterpretError> {
@@ -188,20 +192,22 @@ impl<'src> Interpreter<'src> {
         }
     }
 
-    /// Verbose-only trace line. Suppressed entirely when `config.verbose`
-    /// is false.
+    /// Verbose-only trace line. Suppressed when `verbose` is false or when
+    /// `quiet` is true (quiet wins, caught via `always_print`).
     fn trace(&self, msg: &str) {
         if self.config.verbose {
             self.always_print(msg);
         }
     }
 
-    /// Always prints. In default mode, the message goes at column 0 (no
-    /// indent context is visible, so leading whitespace would be confusing).
-    /// In verbose mode, indent aligns with surrounding trace lines so the
-    /// debug / raw-skip / unknown-call notices sit in the right place in
-    /// the execution structure.
+    /// Always prints (except when `--quiet` suppresses all stdout). In
+    /// default mode, the message goes at column 0 (no indent context is
+    /// visible, so leading whitespace would be confusing). In verbose
+    /// mode, indent aligns with surrounding trace lines.
     fn always_print(&self, msg: &str) {
+        if self.config.quiet {
+            return;
+        }
         if self.config.verbose {
             println!("{}{}", "  ".repeat(self.indent), msg);
         } else {
