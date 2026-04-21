@@ -1,6 +1,6 @@
 [package]
 name = "paxc"
-version = "0.0.1"
+version = "1.2.0"
 edition = "2024"
 description = "A compiler for the pax DSL, producing Power Automate cloud flow definitions"
 license = "MIT"
