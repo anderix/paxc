@@ -85,6 +85,11 @@ impl Value {
 #[derive(Debug, Clone)]
 pub struct InterpretError {
     pub message: String,
+    /// Source span the error should be attributed to, when available.
+    /// Defensive-only errors (internal "should never happen" cases) start
+    /// spanless; the `run_action` wrapper decorates any spanless error with
+    /// the current action's span on its way out.
+    pub span: Option<Span>,
 }
 
 impl fmt::Display for InterpretError {
@@ -98,6 +103,14 @@ impl std::error::Error for InterpretError {}
 fn err(msg: impl Into<String>) -> InterpretError {
     InterpretError {
         message: msg.into(),
+        span: None,
+    }
+}
+
+fn err_at(msg: impl Into<String>, span: Span) -> InterpretError {
+    InterpretError {
+        message: msg.into(),
+        span: Some(span),
     }
 }
 
@@ -248,6 +261,23 @@ impl<'src> Interpreter<'src> {
     }
 
     fn run_action(
+        &mut self,
+        action: &ResolvedAction,
+        top_level: bool,
+    ) -> Result<(), InterpretError> {
+        // Attribute any spanless runtime error to this action's span.
+        // Nested actions (inside if/foreach bodies) resolve first and the
+        // innermost error-originating action wins -- outer frames see the
+        // span already set and don't overwrite it.
+        self.run_action_inner(action, top_level).map_err(|mut e| {
+            if e.span.is_none() {
+                e.span = Some(action.span);
+            }
+            e
+        })
+    }
+
+    fn run_action_inner(
         &mut self,
         action: &ResolvedAction,
         top_level: bool,
@@ -408,9 +438,10 @@ impl<'src> Interpreter<'src> {
     fn eval(&mut self, expr: &Expr) -> Result<Value, InterpretError> {
         match expr {
             Expr::Literal(lit) => Ok(literal_to_value(lit)),
-            Expr::Ref { name, .. } => Err(err(format!(
-                "internal error: unresolved ref {name} reached interpreter"
-            ))),
+            Expr::Ref { name, span } => Err(err_at(
+                format!("internal error: unresolved ref {name} reached interpreter"),
+                *span,
+            )),
             Expr::VarRef(name) => self
                 .vars
                 .get(name)

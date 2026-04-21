@@ -75,6 +75,23 @@ pub fn from_parse_error<'src>(err: &Rich<'_, Token<'src>, Span>) -> Diagnostic {
     Diagnostic::spanned("parse error", *err.span(), label)
 }
 
+/// Convert a runtime error from paxr into a diagnostic. The error's span
+/// is used if present; otherwise the report renders with just the header.
+pub fn from_interpret_error(err: &crate::interpreter::InterpretError) -> Diagnostic {
+    match err.span {
+        Some(span) => Diagnostic::spanned(
+            format!("runtime error: {}", err.message),
+            span,
+            "here",
+        ),
+        None => Diagnostic {
+            message: format!("runtime error: {}", err.message),
+            primary: None,
+            notes: Vec::new(),
+        },
+    }
+}
+
 /// Convert a resolver error into a diagnostic. Uses the error's own span
 /// (the offending identifier) as the primary label. Adds a "did you mean
 /// to call it?" hint when an undefined name matches a known function.

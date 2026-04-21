@@ -255,7 +255,7 @@ where
         let raw_stmt = just(Token::Raw)
             .ignore_then(select! { Token::Ident(s) => s.to_string() })
             .then(object_entries.clone())
-            .map(|(name, body)| Stmt::Raw { name, body });
+            .map_with(|(name, body), e| Stmt::Raw { name, body, span: e.span() });
 
         let let_decl = just(Token::Let)
             .ignore_then(name_spanned.clone())
@@ -296,10 +296,11 @@ where
             .then_ignore(just(Token::In))
             .then(expr.clone())
             .then(block.clone())
-            .map(|((iter, collection), body)| Stmt::Foreach {
+            .map_with(|((iter, collection), body), e| Stmt::Foreach {
                 iter: iter.to_string(),
                 collection,
                 body,
+                span: e.span(),
             });
 
         // `debug(args)` -- each arg keeps its source span so paxr can

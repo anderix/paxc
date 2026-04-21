@@ -85,7 +85,7 @@ fn main() {
     let state = match interpreter::interpret_with(&src, &resolved, config) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("runtime error: {e}");
+            diagnostic::from_interpret_error(&e).report(path, &src);
             process::exit(1);
         }
     };

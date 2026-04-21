@@ -45,6 +45,9 @@ pub enum Stmt {
     Raw {
         name: String,
         body: Vec<(String, Literal)>,
+        /// Span of the whole statement, used for runtime-error localization
+        /// when paxr executes the resolved action.
+        span: Span,
     },
     Let {
         name: String,
@@ -64,6 +67,8 @@ pub enum Stmt {
         iter: String,
         collection: Expr,
         body: Vec<Stmt>,
+        /// Span of the whole statement, used for runtime-error localization.
+        span: Span,
     },
     /// `debug(args)` diagnostic. paxc drops these with an end-of-compile note;
     /// paxr evaluates them and prints `debug: <source>=value at line X`. The

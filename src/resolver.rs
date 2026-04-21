@@ -27,6 +27,9 @@ pub struct ResolvedAction {
     pub name: String,
     pub run_after: Vec<String>,
     pub kind: ActionKind,
+    /// Span of the source statement. paxr uses this to attribute runtime
+    /// errors back to the originating statement in diagnostic output.
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -206,7 +209,7 @@ fn resolve_statements(
     let mut prev_name: Option<String> = None;
 
     for stmt in statements {
-        let (action_name, kind) = match stmt {
+        let (action_name, kind, stmt_span) = match stmt {
             Stmt::VarDecl { name, name_span, ty, value } => {
                 if !top_level {
                     return Err(ResolveError::NestedVarDeclaration {
@@ -229,7 +232,7 @@ fn resolve_statements(
                     ty: ty.clone(),
                     value,
                 };
-                (action_name, kind)
+                (action_name, kind, *name_span)
             }
             Stmt::Let { name, name_span, value } => {
                 if env.contains_key(name) {
@@ -252,6 +255,7 @@ fn resolve_statements(
                         name: name.clone(),
                         value,
                     },
+                    *name_span,
                 )
             }
             Stmt::Assign { name, name_span, op, value } => {
@@ -260,7 +264,7 @@ fn resolve_statements(
                     Some(Binding::Var { ty }) => {
                         let ty = ty.clone();
                         let (base, kind) = lower_assign(name, *name_span, *op, &ty, value)?;
-                        (unique_name(&base, name_counts), kind)
+                        (unique_name(&base, name_counts), kind, *name_span)
                     }
                     Some(Binding::Let { .. }) | Some(Binding::Iterator { .. }) => {
                         return Err(ResolveError::CannotAssignToImmutable {
@@ -276,9 +280,9 @@ fn resolve_statements(
                     }
                 }
             }
-            Stmt::Raw { name, body } => {
+            Stmt::Raw { name, body, span } => {
                 let action_name = unique_name(name, name_counts);
-                (action_name, ActionKind::Raw { body: body.clone() })
+                (action_name, ActionKind::Raw { body: body.clone() }, *span)
             }
             Stmt::If {
                 condition,
@@ -306,12 +310,14 @@ fn resolve_statements(
                         true_branch: true_actions,
                         false_branch: false_actions,
                     },
+                    *condition_span,
                 )
             }
             Stmt::Foreach {
                 iter,
                 collection,
                 body,
+                span,
             } => {
                 let collection = resolve_expr(collection, env)?;
                 let action_name = unique_name("Apply_to_each", name_counts);
@@ -333,6 +339,7 @@ fn resolve_statements(
                         iter_name: iter.clone(),
                         body: body_actions,
                     },
+                    *span,
                 )
             }
             Stmt::Debug { args, span } => {
@@ -347,6 +354,7 @@ fn resolve_statements(
                         args: resolved_args,
                         span: *span,
                     },
+                    *span,
                 )
             }
         };
@@ -359,6 +367,7 @@ fn resolve_statements(
                 name: action_name,
                 run_after: Vec::new(),
                 kind,
+                span: stmt_span,
             });
             continue;
         }
@@ -372,6 +381,7 @@ fn resolve_statements(
             name: action_name,
             run_after,
             kind,
+            span: stmt_span,
         });
     }
 
@@ -886,6 +896,7 @@ mod tests {
                     iter: "x".to_string(),
                     collection: rref("items"),
                     body: vec![var("inner")],
+                    span: sp(),
                 },
             ],
         };
@@ -960,6 +971,7 @@ mod tests {
                         "per_item",
                         Expr::Literal(Literal::Int(1)),
                     )],
+                    span: sp(),
                 },
                 let_stmt("leak", rref("per_item")),
             ],
