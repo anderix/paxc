@@ -372,6 +372,17 @@ where
             .then(default_arm.or_not())
             .delimited_by(just(Token::LBrace), just(Token::RBrace));
 
+        // `scope [name] { ... }`. The optional name becomes part of the action
+        // key. Without one, the resolver auto-suffixes `Scope`, `Scope_1`, ...
+        let scope_stmt = just(Token::Scope)
+            .ignore_then(name.or_not())
+            .then(block.clone())
+            .map_with(|(opt_name, body), e| Stmt::Scope {
+                name: opt_name.map(|s| s.to_string()),
+                body,
+                span: e.span(),
+            });
+
         let switch_stmt = just(Token::Switch)
             .ignore_then(
                 expr.clone().map_with(|cond, e| (cond, e.span())),
@@ -390,6 +401,7 @@ where
             .or(if_stmt)
             .or(foreach_stmt)
             .or(switch_stmt)
+            .or(scope_stmt)
             .or(raw_stmt)
             .or(debug_stmt)
             .or(terminate_stmt)
@@ -736,6 +748,42 @@ mod tests {
             result.has_errors(),
             "expected parse error: message only valid with failed"
         );
+    }
+
+    #[test]
+    fn slice28_scope_unnamed_parses() {
+        let prog = parse("scope {\n  var x: int = 1\n}");
+        match &prog.statements[0] {
+            Stmt::Scope { name, body, .. } => {
+                assert!(name.is_none());
+                assert_eq!(body.len(), 1);
+            }
+            _ => panic!("expected scope"),
+        }
+    }
+
+    #[test]
+    fn slice28_scope_named_parses() {
+        let prog = parse("scope try_work {\n  var x: int = 1\n}");
+        match &prog.statements[0] {
+            Stmt::Scope { name, body, .. } => {
+                assert_eq!(name.as_deref(), Some("try_work"));
+                assert_eq!(body.len(), 1);
+            }
+            _ => panic!("expected scope"),
+        }
+    }
+
+    #[test]
+    fn slice28_scope_empty_body_parses() {
+        let prog = parse("scope {}");
+        match &prog.statements[0] {
+            Stmt::Scope { name, body, .. } => {
+                assert!(name.is_none());
+                assert!(body.is_empty());
+            }
+            _ => panic!("expected scope"),
+        }
     }
 
     #[test]

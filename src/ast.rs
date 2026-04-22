@@ -110,6 +110,18 @@ pub enum Stmt {
         message: Option<Expr>,
         span: Span,
     },
+    /// `scope [<name>] { ... }` -- a no-op container action that groups
+    /// statements. Lowers to PA's Scope action. Body follows the same
+    /// nested-statement rules as if/foreach bodies (no nested `var`).
+    /// An unnamed scope lowers to a PA action keyed `Scope` (auto-suffixed
+    /// if repeated); a named scope keys `Scope_<name>`.
+    Scope {
+        /// Optional source label; the resolver uses this in the PA action key.
+        name: Option<String>,
+        body: Vec<Stmt>,
+        /// Span of the whole statement, used for runtime-error localization.
+        span: Span,
+    },
     /// `switch <subject> { case <literal> { ... } ... default { ... } }`.
     /// Lowers to PA's Switch action. Case values are scalar literals only
     /// (string / int / bool), matching PA's constraint -- no arbitrary

@@ -429,6 +429,12 @@ impl<'src> Interpreter<'src> {
             ActionKind::Debug { args, span } => {
                 self.emit_debug(args, *span)?;
             }
+            ActionKind::Scope { body } => {
+                self.trace(&format!("scope {}", action.name));
+                self.indent += 1;
+                self.run_actions(body, false)?;
+                self.indent -= 1;
+            }
             ActionKind::Switch {
                 subject,
                 subject_span,
@@ -1464,6 +1470,50 @@ mod tests {
             }
             _ => panic!("expected string"),
         }
+    }
+
+    #[test]
+    fn slice28_scope_body_executes_in_order() {
+        let state = run(
+            r#"var n: int = 0
+scope {
+  n = 1
+  n += 4
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(state.vars.get("n"), Some(Value::Int(5))));
+    }
+
+    #[test]
+    fn slice28_nested_scope_works() {
+        let state = run(
+            r#"var n: int = 0
+scope outer {
+  scope inner {
+    n = 42
+  }
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(state.vars.get("n"), Some(Value::Int(42))));
+    }
+
+    #[test]
+    fn slice28_scope_let_scopes_to_body() {
+        // A `let` inside a scope should not appear in the end-of-run dump
+        // alongside top-level bindings.
+        let state = run(
+            r#"var x: int = 1
+scope {
+  let inner = x + 10
+}
+let outer = x"#,
+        )
+        .unwrap();
+        let dump = format_state_dump(&state);
+        assert!(!dump.contains("inner"), "scope let leaked:\n{dump}");
+        assert!(dump.contains("outer"));
     }
 
     #[test]

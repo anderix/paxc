@@ -1,0 +1,40 @@
+// Slice 28: scope block.
+//
+// `scope [<name>] { ... }` groups actions under a single PA Scope action.
+// A scope is a no-op container -- it affects the graph (siblings after
+// the scope chain their runAfter to the scope, not to its contents),
+// but semantics of the body are unchanged.
+//
+// Like `if` and `foreach` bodies, scope bodies reject nested `var`
+// declarations (PA requires InitializeVariable at the workflow root).
+//
+// Scopes become interesting in the next slice when error-path runAfter
+// lets you attach failure handlers to them.
+
+trigger manual
+
+var counter: int = 0
+var message: string = ""
+
+// Anonymous scope -- action key `Scope`.
+scope {
+    counter = 1
+    counter += 4
+    message = "inside anonymous scope"
+}
+
+// Named scope -- action key `Scope_try_work`.
+scope try_work {
+    message &= " | after try_work"
+}
+
+// Nested scopes key as expected: outer gets `Scope_outer`, inner gets
+// `Scope_inner` (the counter is scoped globally so a second anonymous
+// scope outside this would still be `Scope_1`).
+scope outer {
+    scope inner {
+        counter += 100
+    }
+}
+
+debug(counter, message)

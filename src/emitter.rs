@@ -62,6 +62,9 @@ pub fn count_debug_actions(actions: &[ResolvedAction]) -> usize {
                     n += count_debug_actions(default);
                 }
             }
+            ActionKind::Scope { body } => {
+                n += count_debug_actions(body);
+            }
             _ => {}
         }
     }
@@ -134,8 +137,16 @@ fn emit_action(action: &ResolvedAction) -> Value {
             default,
             ..
         } => emit_switch(subject, cases, default.as_deref()),
+        ActionKind::Scope { body } => emit_scope(body),
     };
     splice_run_after(body, &action.run_after)
+}
+
+fn emit_scope(body: &[ResolvedAction]) -> Value {
+    json!({
+        "type": "Scope",
+        "actions": build_actions_map(body),
+    })
 }
 
 fn emit_switch(
@@ -803,6 +814,69 @@ msg &= "!""#,
         assert!(msg.starts_with("@"), "expected PA expression wrapping, got {msg}");
         assert!(msg.contains("concat"));
         assert!(msg.contains("failed at"));
+    }
+
+    #[test]
+    fn slice28_scope_emits_pa_scope_action() {
+        let out = compile(
+            r#"var x: int = 0
+scope {
+  x = 1
+}"#,
+        );
+        let actions = out["definition"]["actions"].as_object().unwrap();
+        assert!(actions.contains_key("Scope"));
+        let scope = &actions["Scope"];
+        assert_eq!(scope["type"], "Scope");
+        // Body actions live under the scope, not at workflow top level.
+        assert!(!actions.contains_key("Set_x"));
+        assert!(
+            scope["actions"]
+                .as_object()
+                .unwrap()
+                .contains_key("Set_x")
+        );
+    }
+
+    #[test]
+    fn slice28_scope_named_keys_by_name() {
+        let out = compile(
+            r#"scope try_work {
+}"#,
+        );
+        let actions = out["definition"]["actions"].as_object().unwrap();
+        assert!(actions.contains_key("Scope_try_work"));
+    }
+
+    #[test]
+    fn slice28_multiple_scopes_unique_names() {
+        let out = compile(
+            r#"scope {
+}
+scope {
+}"#,
+        );
+        let actions = out["definition"]["actions"].as_object().unwrap();
+        assert!(actions.contains_key("Scope"));
+        assert!(actions.contains_key("Scope_1"));
+    }
+
+    #[test]
+    fn slice28_scope_chains_sibling_run_after() {
+        // A statement after a Scope should chain its runAfter to the Scope,
+        // not to anything inside it.
+        let out = compile(
+            r#"var x: int = 1
+scope {
+  x = 2
+}
+x = 99"#,
+        );
+        let actions = &out["definition"]["actions"];
+        assert_eq!(
+            actions["Set_x_1"]["runAfter"],
+            json!({ "Scope": ["Succeeded"] })
+        );
     }
 
     #[test]

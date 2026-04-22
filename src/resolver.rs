@@ -100,6 +100,12 @@ pub enum ActionKind {
         status: TerminateStatus,
         message: Option<Expr>,
     },
+    /// `scope [name] { body }` -- a PA Scope action. Pure container; the
+    /// interpreter walks the body like any other block. Only the name form
+    /// varies the action key.
+    Scope {
+        body: Vec<ResolvedAction>,
+    },
     /// `switch subject { case L { ... } ... default { ... } }`. Each case
     /// has a literal value and a resolved body; `default` is `None` when the
     /// source omitted the default arm.
@@ -386,6 +392,22 @@ fn resolve_statements(
                     },
                     *span,
                 )
+            }
+            Stmt::Scope {
+                name: scope_name,
+                body,
+                span,
+            } => {
+                let base = match scope_name {
+                    Some(n) => format!("Scope_{n}"),
+                    None => "Scope".to_string(),
+                };
+                let action_name = unique_name(&base, name_counts);
+                // Scope body scopes its own `let` bindings like if/foreach.
+                let saved_env = env.clone();
+                let body_actions = resolve_statements(body, env, name_counts, false)?;
+                *env = saved_env;
+                (action_name, ActionKind::Scope { body: body_actions }, *span)
             }
             Stmt::Switch {
                 subject,
@@ -1090,6 +1112,71 @@ mod tests {
             ],
         };
         assert!(resolve(&prog).is_ok());
+    }
+
+    #[test]
+    fn slice28_scope_unnamed_gets_bare_action_key() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![Stmt::Scope {
+                name: None,
+                body: vec![],
+                span: sp(),
+            }],
+        };
+        let resolved = resolve(&prog).unwrap();
+        assert_eq!(resolved.actions[0].name, "Scope");
+        assert!(matches!(resolved.actions[0].kind, ActionKind::Scope { .. }));
+    }
+
+    #[test]
+    fn slice28_scope_named_keys_by_name() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![Stmt::Scope {
+                name: Some("try_api".to_string()),
+                body: vec![],
+                span: sp(),
+            }],
+        };
+        let resolved = resolve(&prog).unwrap();
+        assert_eq!(resolved.actions[0].name, "Scope_try_api");
+    }
+
+    #[test]
+    fn slice28_scope_nested_var_decl_is_error() {
+        // Like if/foreach, Scope bodies reject nested `var`.
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![Stmt::Scope {
+                name: None,
+                body: vec![var("inner")],
+                span: sp(),
+            }],
+        };
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::NestedVarDeclaration { name, .. } if name == "inner"
+        ));
+    }
+
+    #[test]
+    fn slice28_scope_let_does_not_leak() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                Stmt::Scope {
+                    name: None,
+                    body: vec![let_stmt("inner", Expr::Literal(Literal::Int(1)))],
+                    span: sp(),
+                },
+                let_stmt("leak", rref("inner")),
+            ],
+        };
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::UndefinedVariable { name, .. } if name == "inner"
+        ));
     }
 
     #[test]
