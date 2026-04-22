@@ -19,17 +19,19 @@ where
 
     let ty = select! {
         Token::Ident("int") => Type::Int,
+        Token::Ident("float") => Type::Float,
         Token::Ident("string") => Type::String,
         Token::Ident("bool") => Type::Bool,
         Token::Ident("array") => Type::Array,
         Token::Ident("object") => Type::Object,
     }
-    .labelled("type name (int, string, bool, array, or object)");
+    .labelled("type name (int, float, string, bool, array, or object)");
 
     let literal = recursive(|literal| {
         let scalar = select! {
             Token::Null => Literal::Null,
             Token::Int(n) => Literal::Int(n),
+            Token::Float(x) => Literal::Float(x),
             Token::Str(s) => Literal::String(s),
             Token::Bool(b) => Literal::Bool(b),
         };

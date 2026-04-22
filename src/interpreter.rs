@@ -25,6 +25,7 @@ use uuid::Uuid;
 pub enum Value {
     Null,
     Int(i64),
+    Float(f64),
     Str(String),
     Bool(bool),
     Array(Vec<Value>),
@@ -36,6 +37,7 @@ impl Value {
         match self {
             Value::Null => JsonValue::Null,
             Value::Int(n) => json!(n),
+            Value::Float(x) => json!(x),
             Value::Str(s) => JsonValue::String(s.clone()),
             Value::Bool(b) => json!(b),
             Value::Array(items) => JsonValue::Array(items.iter().map(Value::to_json).collect()),
@@ -61,6 +63,16 @@ impl Value {
         }
     }
 
+    /// Numeric view: Int and Float both lift to f64. Returns None for
+    /// non-numeric values.
+    fn as_number(&self) -> Option<f64> {
+        match self {
+            Value::Int(n) => Some(*n as f64),
+            Value::Float(x) => Some(*x),
+            _ => None,
+        }
+    }
+
     fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Bool(b) => Some(*b),
@@ -72,14 +84,34 @@ impl Value {
         match self {
             Value::Str(s) => s.clone(),
             Value::Int(n) => n.to_string(),
+            Value::Float(x) => format_float_display(*x),
             Value::Bool(b) => b.to_string(),
             Value::Null => String::new(),
             other => serde_json::to_string(&other.to_json()).unwrap_or_default(),
         }
     }
 
+    /// Happy-path numeric equality: `5 == 5.0` → true. Non-numeric pairs
+    /// fall back to JSON structural equality (the pre-float behavior).
+    /// Documented divergence from PA's strict JToken comparison -- paxr is
+    /// a simulator, not a spec replica.
     fn equals(&self, other: &Value) -> bool {
+        if let (Some(a), Some(b)) = (self.as_number(), other.as_number()) {
+            return a == b;
+        }
         self.to_json() == other.to_json()
+    }
+}
+
+/// Display form for a float in debug output. Mirrors emitter::format_float:
+/// always show at least one fractional digit so a reader can tell at a
+/// glance that the value is a float, not an int.
+fn format_float_display(x: f64) -> String {
+    let s = format!("{x}");
+    if s.contains('.') || s.contains('e') || s.contains('E') {
+        s
+    } else {
+        format!("{s}.0")
     }
 }
 
@@ -300,6 +332,14 @@ impl<'src> Interpreter<'src> {
         match &action.kind {
             ActionKind::InitializeVariable { var, ty, value } => {
                 let v = self.eval(value)?;
+                // Coerce numeric init values to match the declared type so
+                // floatness survives later increments. `var x: float = 5`
+                // stores Float(5.0), not Int(5) -- otherwise `x += 1` would
+                // stay in int-land and silently lose the declared type.
+                let v = match (ty, &v) {
+                    (Type::Float, Value::Int(n)) => Value::Float(*n as f64),
+                    _ => v,
+                };
                 self.trace(&format!("init {var} = {}", v.display_compact()));
                 self.vars.insert(var.clone(), v);
                 // Resolver already enforces var decls are top-level, but
@@ -318,30 +358,28 @@ impl<'src> Interpreter<'src> {
                 self.vars.insert(var.clone(), v);
             }
             ActionKind::IncrementVariable { var, value } => {
-                let delta = self.eval(value)?.as_int().ok_or_else(|| {
-                    err(format!("increment on {var} requires int value"))
-                })?;
+                let delta = self.eval(value)?;
                 let current = self
                     .vars
                     .get(var)
-                    .and_then(Value::as_int)
-                    .ok_or_else(|| err(format!("variable {var} is not an int")))?;
-                let new = current + delta;
-                self.trace(&format!("increment {var} = {new}"));
-                self.vars.insert(var.clone(), Value::Int(new));
+                    .cloned()
+                    .ok_or_else(|| err(format!("unknown variable {var}")))?;
+                let new = numeric_combine(&current, &delta, "+", |a, b| a + b, |a, b| a + b)
+                    .ok_or_else(|| err(format!("increment on {var} requires numeric values")))?;
+                self.trace(&format!("increment {var} = {}", new.display_compact()));
+                self.vars.insert(var.clone(), new);
             }
             ActionKind::DecrementVariable { var, value } => {
-                let delta = self.eval(value)?.as_int().ok_or_else(|| {
-                    err(format!("decrement on {var} requires int value"))
-                })?;
+                let delta = self.eval(value)?;
                 let current = self
                     .vars
                     .get(var)
-                    .and_then(Value::as_int)
-                    .ok_or_else(|| err(format!("variable {var} is not an int")))?;
-                let new = current - delta;
-                self.trace(&format!("decrement {var} = {new}"));
-                self.vars.insert(var.clone(), Value::Int(new));
+                    .cloned()
+                    .ok_or_else(|| err(format!("unknown variable {var}")))?;
+                let new = numeric_combine(&current, &delta, "-", |a, b| a - b, |a, b| a - b)
+                    .ok_or_else(|| err(format!("decrement on {var} requires numeric values")))?;
+                self.trace(&format!("decrement {var} = {}", new.display_compact()));
+                self.vars.insert(var.clone(), new);
             }
             ActionKind::AppendToStringVariable { var, value } => {
                 let suffix = self.eval(value)?.coerce_str();
@@ -654,6 +692,7 @@ pub fn format_state_dump(state: &FinalState) -> String {
 fn type_name(ty: &Type) -> &'static str {
     match ty {
         Type::Int => "int",
+        Type::Float => "float",
         Type::String => "string",
         Type::Bool => "bool",
         Type::Array => "array",
@@ -676,6 +715,7 @@ fn literal_to_value(lit: &Literal) -> Value {
     match lit {
         Literal::Null => Value::Null,
         Literal::Int(n) => Value::Int(*n),
+        Literal::Float(x) => Value::Float(*x),
         Literal::String(s) => Value::Str(s.clone()),
         Literal::Bool(b) => Value::Bool(*b),
         Literal::Array(items) => Value::Array(items.iter().map(literal_to_value).collect()),
@@ -690,21 +730,18 @@ fn literal_to_value(lit: &Literal) -> Value {
 
 fn eval_binop(op: BinOp, l: Value, r: Value) -> Result<Value, InterpretError> {
     match op {
-        BinOp::Add => int_pair(l, r, "+", |a, b| a + b),
-        BinOp::Sub => int_pair(l, r, "-", |a, b| a - b),
-        BinOp::Mul => int_pair(l, r, "*", |a, b| a * b),
-        BinOp::Div => {
-            let (a, b) = int_extract(l, r, "/")?;
-            if b == 0 {
-                return Err(err("division by zero"));
-            }
-            Ok(Value::Int(a / b))
-        }
+        BinOp::Add => numeric_combine(&l, &r, "+", |a, b| a + b, |a, b| a + b)
+            .ok_or_else(|| err("+ requires numeric operands")),
+        BinOp::Sub => numeric_combine(&l, &r, "-", |a, b| a - b, |a, b| a - b)
+            .ok_or_else(|| err("- requires numeric operands")),
+        BinOp::Mul => numeric_combine(&l, &r, "*", |a, b| a * b, |a, b| a * b)
+            .ok_or_else(|| err("* requires numeric operands")),
+        BinOp::Div => numeric_div(&l, &r),
         BinOp::Concat => Ok(Value::Str(l.coerce_str() + &r.coerce_str())),
-        BinOp::Less => int_cmp(l, r, "<", |a, b| a < b),
-        BinOp::LessEq => int_cmp(l, r, "<=", |a, b| a <= b),
-        BinOp::Greater => int_cmp(l, r, ">", |a, b| a > b),
-        BinOp::GreaterEq => int_cmp(l, r, ">=", |a, b| a >= b),
+        BinOp::Less => numeric_cmp(&l, &r, "<", |a, b| a < b, |a, b| a < b),
+        BinOp::LessEq => numeric_cmp(&l, &r, "<=", |a, b| a <= b, |a, b| a <= b),
+        BinOp::Greater => numeric_cmp(&l, &r, ">", |a, b| a > b, |a, b| a > b),
+        BinOp::GreaterEq => numeric_cmp(&l, &r, ">=", |a, b| a >= b, |a, b| a >= b),
         BinOp::Equals => Ok(Value::Bool(l.equals(&r))),
         BinOp::NotEquals => Ok(Value::Bool(!l.equals(&r))),
         BinOp::And => bool_pair(l, r, "&&", |a, b| a && b),
@@ -712,34 +749,71 @@ fn eval_binop(op: BinOp, l: Value, r: Value) -> Result<Value, InterpretError> {
     }
 }
 
-fn int_pair<F: FnOnce(i64, i64) -> i64>(
-    l: Value,
-    r: Value,
-    op: &str,
-    f: F,
-) -> Result<Value, InterpretError> {
-    let (a, b) = int_extract(l, r, op)?;
-    Ok(Value::Int(f(a, b)))
+/// Numeric combinator: Int+Int stays Int, any Float involvement promotes to
+/// Float. Returns None if either side isn't numeric.
+fn numeric_combine<Fi, Ff>(l: &Value, r: &Value, _op: &str, fi: Fi, ff: Ff) -> Option<Value>
+where
+    Fi: FnOnce(i64, i64) -> i64,
+    Ff: FnOnce(f64, f64) -> f64,
+{
+    match (l, r) {
+        (Value::Int(a), Value::Int(b)) => Some(Value::Int(fi(*a, *b))),
+        _ => {
+            let a = l.as_number()?;
+            let b = r.as_number()?;
+            Some(Value::Float(ff(a, b)))
+        }
+    }
 }
 
-fn int_cmp<F: FnOnce(i64, i64) -> bool>(
-    l: Value,
-    r: Value,
-    op: &str,
-    f: F,
-) -> Result<Value, InterpretError> {
-    let (a, b) = int_extract(l, r, op)?;
-    Ok(Value::Bool(f(a, b)))
+fn numeric_div(l: &Value, r: &Value) -> Result<Value, InterpretError> {
+    match (l, r) {
+        (Value::Int(a), Value::Int(b)) => {
+            if *b == 0 {
+                Err(err("division by zero"))
+            } else {
+                Ok(Value::Int(a / b))
+            }
+        }
+        _ => {
+            let a = l
+                .as_number()
+                .ok_or_else(|| err("left side of / is not numeric"))?;
+            let b = r
+                .as_number()
+                .ok_or_else(|| err("right side of / is not numeric"))?;
+            if b == 0.0 {
+                Err(err("division by zero"))
+            } else {
+                Ok(Value::Float(a / b))
+            }
+        }
+    }
 }
 
-fn int_extract(l: Value, r: Value, op: &str) -> Result<(i64, i64), InterpretError> {
-    let a = l
-        .as_int()
-        .ok_or_else(|| err(format!("left side of {op} is not an int")))?;
-    let b = r
-        .as_int()
-        .ok_or_else(|| err(format!("right side of {op} is not an int")))?;
-    Ok((a, b))
+fn numeric_cmp<Fi, Ff>(
+    l: &Value,
+    r: &Value,
+    op: &str,
+    fi: Fi,
+    ff: Ff,
+) -> Result<Value, InterpretError>
+where
+    Fi: FnOnce(i64, i64) -> bool,
+    Ff: FnOnce(f64, f64) -> bool,
+{
+    match (l, r) {
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(fi(*a, *b))),
+        _ => {
+            let a = l
+                .as_number()
+                .ok_or_else(|| err(format!("left side of {op} is not numeric")))?;
+            let b = r
+                .as_number()
+                .ok_or_else(|| err(format!("right side of {op} is not numeric")))?;
+            Ok(Value::Bool(ff(a, b)))
+        }
+    }
 }
 
 fn bool_pair<F: FnOnce(bool, bool) -> bool>(
@@ -1288,6 +1362,63 @@ mod tests {
         )
         .unwrap();
         assert_eq!(state.vars.get("x").and_then(Value::as_int), Some(0));
+    }
+
+    #[test]
+    fn slice31_float_init_and_increment() {
+        let state = run("var rate: float = 1.5\nrate += 0.25").unwrap();
+        match state.vars.get("rate") {
+            Some(Value::Float(x)) => assert!((x - 1.75).abs() < 1e-12),
+            other => panic!("expected Value::Float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slice31_float_var_coerces_int_literal_at_init() {
+        // `var x: float = 5` stores Float(5.0), not Int(5), so later
+        // increments stay in float-land.
+        let state = run("var x: float = 5\nx += 0.5").unwrap();
+        match state.vars.get("x") {
+            Some(Value::Float(v)) => assert!((v - 5.5).abs() < 1e-12),
+            other => panic!("expected Value::Float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slice31_mixed_int_float_promotes() {
+        // Int * Float -> Float(12.5)
+        let v = eval_let("var qty: int = 10\nlet total = qty * 1.25", "total");
+        match v {
+            Value::Float(x) => assert!((x - 12.5).abs() < 1e-12),
+            other => panic!("expected Float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slice31_int_int_division_stays_int() {
+        // Consistent with PA: int/int is integer division.
+        let v = eval_let("let q = 7 / 2", "q");
+        assert!(matches!(v, Value::Int(3)));
+        // Any float side promotes.
+        let v = eval_let("let q = 7.0 / 2", "q");
+        match v {
+            Value::Float(x) => assert!((x - 3.5).abs() < 1e-12),
+            other => panic!("expected Float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slice31_equals_is_numeric_across_int_and_float() {
+        // 5 == 5.0 -> true (paxr's documented happy-path divergence from PA).
+        assert!(matches!(eval_let("let eq = 5 == 5.0", "eq"), Value::Bool(true)));
+        assert!(matches!(eval_let("let eq = 5.0 == 5", "eq"), Value::Bool(true)));
+        assert!(matches!(eval_let("let eq = 5.5 == 5", "eq"), Value::Bool(false)));
+    }
+
+    #[test]
+    fn slice31_float_division_by_zero_errors() {
+        let e = run("let q = 1.0 / 0.0").unwrap_err();
+        assert!(e.message.contains("division by zero"));
     }
 
     #[test]

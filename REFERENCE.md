@@ -66,6 +66,7 @@ Advanced recurrence features such as `startTime`, `timeZone`, and the nested `sc
 
 ```
 var counter: int = 0
+var rate: float = 1.5
 var greeting: string = "hello"
 var active: bool = true
 var tags: array = ["urgent", "review"]
@@ -75,7 +76,9 @@ var config: object = {
 }
 ```
 
-A `var` declaration compiles to a Power Automate `InitializeVariable` action named `Initialize_<name>`. The five v1 types are `int`, `string`, `bool`, `array`, and `object`. Array and object literals use JSON-like syntax, and trailing commas are permitted.
+A `var` declaration compiles to a Power Automate `InitializeVariable` action named `Initialize_<name>`. The six v1 types are `int`, `float`, `string`, `bool`, `array`, and `object`. Float literals require at least one digit after the decimal point (`1.5`, `0.25`), so identifier access like `obj.field` is never ambiguous. Int and float mix freely in arithmetic and comparisons: any float operand promotes the result to float, while int operated on int stays int (including `/`, which matches Power Automate's integer-division behavior). An int literal assigned to a float-typed variable is coerced at initialization, so `var budget: float = 5` followed by `budget += 0.5` gives `5.5`, not an int. Array and object literals use JSON-like syntax, and trailing commas are permitted.
+
+One paxr-specific note on equality: the interpreter treats `5 == 5.0` as true so numeric comparisons across the two types behave sanely during local simulation. Power Automate's expression language uses strict JToken equality and would consider those unequal, so do not rely on cross-type `==` for business logic. The stub-and-fix workflow tests the real flow in Power Automate anyway.
 
 ## let and Compose
 
@@ -96,7 +99,7 @@ message &= ", world"
 tags += "urgent"
 ```
 
-Variables declared with `var` support four assignment forms. Plain `=` compiles to `SetVariable`. The compound forms each map to a dedicated Power Automate action: `+=` on an int becomes `IncrementVariable`, `-=` becomes `DecrementVariable`, `&=` on a string becomes `AppendToStringVariable`, and `+=` on an array becomes `AppendToArrayVariable`. Each assignment is a separate action in the emitted flow. Compose bindings (`let`) cannot be reassigned.
+Variables declared with `var` support four assignment forms. Plain `=` compiles to `SetVariable`. The compound forms each map to a dedicated Power Automate action: `+=` on an int or float becomes `IncrementVariable`, `-=` on an int or float becomes `DecrementVariable`, `&=` on a string becomes `AppendToStringVariable`, and `+=` on an array becomes `AppendToArrayVariable`. Each assignment is a separate action in the emitted flow. Compose bindings (`let`) cannot be reassigned.
 
 ## String literals and escapes
 

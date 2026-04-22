@@ -287,6 +287,7 @@ pub enum UnaryOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Int,
+    Float,
     String,
     Bool,
     Array,
@@ -335,6 +336,7 @@ pub enum Expr {
 pub enum Literal {
     Null,
     Int(i64),
+    Float(f64),
     String(String),
     Bool(bool),
     Array(Vec<Literal>),

@@ -365,6 +365,7 @@ fn pa_literal(lit: &Literal) -> String {
     match lit {
         Literal::Null => "null".to_string(),
         Literal::Int(n) => n.to_string(),
+        Literal::Float(x) => format_float(*x),
         Literal::Bool(b) => b.to_string(),
         Literal::String(s) => format!("'{}'", s.replace('\'', "''")),
         Literal::Array(_) | Literal::Object(_) => {
@@ -382,6 +383,7 @@ fn expr_to_pa_field(expr: &Expr) -> String {
 fn emit_initialize(name: &str, ty: &Type, value: &Expr) -> Value {
     let ty_str = match ty {
         Type::Int => "Integer",
+        Type::Float => "Float",
         Type::String => "String",
         Type::Bool => "Boolean",
         Type::Array => "Array",
@@ -402,6 +404,7 @@ fn literal_to_json(lit: &Literal) -> Value {
     match lit {
         Literal::Null => Value::Null,
         Literal::Int(n) => json!(n),
+        Literal::Float(x) => json!(x),
         Literal::String(s) => json!(s),
         Literal::Bool(b) => json!(b),
         Literal::Array(items) => Value::Array(items.iter().map(literal_to_json).collect()),
@@ -412,6 +415,18 @@ fn literal_to_json(lit: &Literal) -> Value {
             }
             Value::Object(map)
         }
+    }
+}
+
+/// Renders an f64 in a form PA's expression parser accepts: always include
+/// at least one fractional digit so the number is unambiguously a float.
+/// `1.0` stays `1.0`, `1.5` stays `1.5`, integers-in-float stay `5.0`.
+fn format_float(x: f64) -> String {
+    let s = format!("{x}");
+    if s.contains('.') || s.contains('e') || s.contains('E') {
+        s
+    } else {
+        format!("{s}.0")
     }
 }
 
@@ -447,6 +462,33 @@ mod tests {
             .expect("parse failed");
         let resolved = resolve(&program).expect("resolve failed");
         emit(&resolved)
+    }
+
+    #[test]
+    fn slice31_float_var_emits_pa_float_type() {
+        let out = compile("var rate: float = 1.5");
+        let v = &out["definition"]["actions"]["Initialize_rate"]["inputs"]["variables"][0];
+        assert_eq!(v["type"], "Float");
+        assert_eq!(v["value"].as_f64().unwrap(), 1.5);
+    }
+
+    #[test]
+    fn slice31_float_literal_in_pa_expression() {
+        // `rate + 0.5` inside an int-style binop slot should render the float
+        // literal with a fractional digit so PA's expression parser never
+        // interprets it as an int.
+        let out = compile("var rate: float = 1.0\nrate += 2.0");
+        let v = &out["definition"]["actions"]["Increment_rate"]["inputs"]["value"];
+        assert_eq!(v.as_f64().unwrap(), 2.0);
+    }
+
+    #[test]
+    fn slice31_format_float_keeps_fractional() {
+        // Internal check: whole-valued floats keep a `.0` so the PA
+        // expression parser never sees them as integer literals.
+        assert_eq!(format_float(1.0), "1.0");
+        assert_eq!(format_float(1.5), "1.5");
+        assert_eq!(format_float(-3.25), "-3.25");
     }
 
     #[test]

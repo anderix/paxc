@@ -1,0 +1,37 @@
+// Slice 31: float type.
+//
+// `float` is PA's Float variable type -- IEEE 754 f64 in practice. It
+// participates in arithmetic and comparisons alongside int via numeric
+// promotion: any float operand makes the result a float. Int/Int stays
+// int (including `/` which is integer division, matching PA).
+//
+// A literal like `5` assigned to a float var is coerced at init so later
+// increments stay in float-land. `var x: float = 5; x += 0.1` gives 5.1.
+//
+// paxr's `==` compares Int and Float numerically: `5 == 5.0` is true.
+// This diverges from PA's strict JToken equality; it's a paxr happy-path
+// convenience, not a spec guarantee.
+
+trigger manual
+
+// Plain float, with arithmetic.
+var rate: float = 1.5
+rate += 0.25            // 1.75
+rate -= 0.5             // 1.25
+
+// Mixed int/float arithmetic via let bindings.
+var qty: int = 10
+let total = qty * rate   // 10 * 1.25 -> Float(12.5)
+
+// Numeric comparison crosses types cleanly.
+var over: bool = false
+if total > 10 {
+    over = true
+}
+
+// Init-time coercion: int literal 5 stored as Float(5.0) because the
+// declared type is float.
+var budget: float = 5
+budget += 0.5           // 5.5, not 5 (would stay int without coercion)
+
+debug(rate, total, over, budget)

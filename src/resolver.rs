@@ -272,6 +272,7 @@ impl std::error::Error for ResolveError {}
 fn type_name(ty: &Type) -> &'static str {
     match ty {
         Type::Int => "int",
+        Type::Float => "float",
         Type::String => "string",
         Type::Bool => "bool",
         Type::Array => "array",
@@ -701,7 +702,7 @@ fn lower_assign(
             },
         )),
         AssignOp::Add => match ty {
-            Type::Int => Ok((
+            Type::Int | Type::Float => Ok((
                 format!("Increment_{name}"),
                 ActionKind::IncrementVariable {
                     var: name.to_string(),
@@ -718,7 +719,7 @@ fn lower_assign(
             _ => Err(invalid()),
         },
         AssignOp::Subtract => match ty {
-            Type::Int => Ok((
+            Type::Int | Type::Float => Ok((
                 format!("Decrement_{name}"),
                 ActionKind::DecrementVariable {
                     var: name.to_string(),
@@ -991,6 +992,7 @@ mod tests {
     fn add_dispatches_by_type() {
         let cases = [
             (Type::Int, "Increment_x"),
+            (Type::Float, "Increment_x"),
             (Type::Array, "Append_to_x"),
         ];
         for (ty, expected_name) in cases {
@@ -1046,7 +1048,7 @@ mod tests {
 
     #[test]
     fn concat_assign_rejects_non_string() {
-        for ty in [Type::Int, Type::Bool, Type::Array, Type::Object] {
+        for ty in [Type::Int, Type::Float, Type::Bool, Type::Array, Type::Object] {
             let prog = Program {
                 trigger: Trigger::Manual,
                 statements: vec![
@@ -1066,7 +1068,8 @@ mod tests {
     }
 
     #[test]
-    fn subtract_only_on_int() {
+    fn subtract_only_on_numeric() {
+        // String rejected; Int and Float accepted.
         let prog = Program {
             trigger: Trigger::Manual,
             statements: vec![
@@ -1078,6 +1081,17 @@ mod tests {
             resolve(&prog).unwrap_err(),
             ResolveError::InvalidOperation { .. }
         ));
+        for ty in [Type::Int, Type::Float] {
+            let prog = Program {
+                trigger: Trigger::Manual,
+                statements: vec![
+                    var_ty("x", ty),
+                    assign("x", AssignOp::Subtract, Expr::Literal(Literal::Int(1))),
+                ],
+            };
+            let resolved = resolve(&prog).unwrap();
+            assert_eq!(resolved.actions[1].name, "Decrement_x");
+        }
     }
 
     #[test]

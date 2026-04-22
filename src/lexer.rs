@@ -31,6 +31,7 @@ pub enum Token<'src> {
     Null,
     Ident(&'src str),
     Int(i64),
+    Float(f64),
     Str(String),
     Bool(bool),
     Colon,
@@ -84,6 +85,7 @@ impl fmt::Display for Token<'_> {
             Token::Null => f.write_str("`null`"),
             Token::Ident(s) => write!(f, "`{s}`"),
             Token::Int(n) => write!(f, "`{n}`"),
+            Token::Float(x) => write!(f, "`{x}`"),
             Token::Str(s) => write!(f, "string \"{s}\""),
             Token::Bool(b) => write!(f, "`{b}`"),
             Token::Colon => f.write_str("`:`"),
@@ -119,11 +121,16 @@ impl fmt::Display for Token<'_> {
 
 pub fn lexer<'src>()
 -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char, Span>>> {
-    let int = text::int(10)
-        .to_slice()
-        .from_str::<i64>()
-        .unwrapped()
-        .map(Token::Int);
+    // Numbers: `<digits>` → Int, `<digits>.<digits>` → Float. The fractional
+    // tail is `or_not` so `obj.field` and `3.foo` still tokenize as int + dot
+    // + rest (or_not rewinds when `.` is present but no digits follow).
+    let fraction = just('.').then(text::digits(10)).to_slice();
+    let number = text::int(10)
+        .then(fraction.or_not())
+        .map(|(int_part, frac): (&str, Option<&str>)| match frac {
+            Some(frac) => Token::Float(format!("{int_part}{frac}").parse::<f64>().unwrap()),
+            None => Token::Int(int_part.parse::<i64>().unwrap()),
+        });
 
     let escape = just('\\').ignore_then(choice((
         just('n').to('\n'),
@@ -196,7 +203,7 @@ pub fn lexer<'src>()
         _ => Token::Ident(s),
     });
 
-    let token = int.or(str_).or(compound).or(ctrl).or(ident);
+    let token = number.or(str_).or(compound).or(ctrl).or(ident);
 
     let comment = just("//")
         .then(any().and_is(just('\n').not()).repeated())
@@ -283,6 +290,30 @@ mod tests {
                 Token::Int(1),
             ]
         );
+    }
+
+    #[test]
+    fn slice31_float_literals() {
+        // Standard float literal.
+        assert_eq!(
+            lex("var rate: float = 1.5"),
+            vec![
+                Token::Var,
+                Token::Ident("rate"),
+                Token::Colon,
+                Token::Ident("float"),
+                Token::Eq,
+                Token::Float(1.5),
+            ]
+        );
+        // Leading zero in fractional part is fine.
+        match lex("0.05").as_slice() {
+            [Token::Float(f)] => assert!((f - 0.05).abs() < 1e-12),
+            other => panic!("expected single float token, got {other:?}"),
+        }
+        // Trailing `.` with no digits stays int + dot (member-access path).
+        assert_eq!(lex("obj.field"), vec![Token::Ident("obj"), Token::Dot, Token::Ident("field")]);
+        assert_eq!(lex("3.foo"), vec![Token::Int(3), Token::Dot, Token::Ident("foo")]);
     }
 
     #[test]
