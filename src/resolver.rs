@@ -106,6 +106,16 @@ pub enum ActionKind {
     Scope {
         body: Vec<ResolvedAction>,
     },
+    /// `until <condition> { body }` -- PA's Until loop. The condition is the
+    /// exit condition; body runs at least once. Emitter uses PA's default
+    /// limit (60 iterations, PT1H timeout); paxr caps iterations at 60 too,
+    /// producing a notice and stopping cleanly to mirror PA's cap behavior.
+    Until {
+        condition: Expr,
+        /// Source span of the condition expression, mirrors Condition's span.
+        condition_span: Span,
+        body: Vec<ResolvedAction>,
+    },
     /// `switch subject { case L { ... } ... default { ... } }`. Each case
     /// has a literal value and a resolved body; `default` is `None` when the
     /// source omitted the default arm.
@@ -389,6 +399,28 @@ fn resolve_statements(
                     ActionKind::Debug {
                         args: resolved_args,
                         span: *span,
+                    },
+                    *span,
+                )
+            }
+            Stmt::Until {
+                condition,
+                condition_span,
+                body,
+                span,
+            } => {
+                let condition = resolve_expr(condition, env)?;
+                let action_name = unique_name("Until", name_counts);
+                // Body scopes lets to itself, same as foreach/if-branches.
+                let saved_env = env.clone();
+                let body_actions = resolve_statements(body, env, name_counts, false)?;
+                *env = saved_env;
+                (
+                    action_name,
+                    ActionKind::Until {
+                        condition,
+                        condition_span: *condition_span,
+                        body: body_actions,
                     },
                     *span,
                 )

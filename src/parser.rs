@@ -293,6 +293,18 @@ where
                 })
         });
 
+        // `until <condition> { body }` -- PA's Until (do-while) loop. The
+        // condition is the exit condition.
+        let until_stmt = just(Token::Until)
+            .ignore_then(expr.clone().map_with(|cond, e| (cond, e.span())))
+            .then(block.clone())
+            .map_with(|((condition, condition_span), body), e| Stmt::Until {
+                condition,
+                condition_span,
+                body,
+                span: e.span(),
+            });
+
         let foreach_stmt = just(Token::Foreach)
             .ignore_then(name)
             .then_ignore(just(Token::In))
@@ -400,6 +412,7 @@ where
             .or(let_decl)
             .or(if_stmt)
             .or(foreach_stmt)
+            .or(until_stmt)
             .or(switch_stmt)
             .or(scope_stmt)
             .or(raw_stmt)
@@ -748,6 +761,35 @@ mod tests {
             result.has_errors(),
             "expected parse error: message only valid with failed"
         );
+    }
+
+    #[test]
+    fn slice29_until_parses() {
+        let prog = parse("var n: int = 0\nuntil n > 5 { n += 1 }");
+        match &prog.statements[1] {
+            Stmt::Until { body, .. } => assert_eq!(body.len(), 1),
+            _ => panic!("expected until"),
+        }
+    }
+
+    #[test]
+    fn slice29_until_condition_span_covers_source() {
+        let src = "trigger manual\nvar n: int = 0\nuntil n > 5 { n += 1 }";
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        let prog = parser()
+            .parse(
+                tokens
+                    .as_slice()
+                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+            )
+            .into_result()
+            .expect("parse failed");
+        match &prog.statements[1] {
+            Stmt::Until { condition_span, .. } => {
+                assert_eq!(&src[condition_span.start..condition_span.end], "n > 5");
+            }
+            _ => panic!("expected until"),
+        }
     }
 
     #[test]

@@ -1,0 +1,38 @@
+// Slice 29: until loop.
+//
+// `until <condition> { ... }` is PA's do-while. The condition is the
+// EXIT condition: the body runs at least once, then the expression is
+// evaluated, and the loop exits when it becomes true.
+//
+// paxc emits PA's defaults (60 iterations, 1 hour timeout). paxr caps
+// its own local simulation at 60 iterations too, surfacing a notice if
+// hit so you can tell the cap from a clean exit.
+//
+// terminate inside the body halts the loop (and the whole program).
+
+trigger manual
+
+// Basic counter -- exits when n >= 3.
+var n: int = 0
+until n >= 3 {
+    n += 1
+}
+
+// Body runs at least once even if condition is already true on entry.
+// After this runs, m == 11, not 10.
+var m: int = 10
+until m > 5 {
+    m += 1
+}
+
+// Boolean flag pattern -- classic do-while shape.
+var tries: int = 0
+var done: bool = false
+until done {
+    tries += 1
+    if tries >= 2 {
+        done = true
+    }
+}
+
+debug(n, m, tries)

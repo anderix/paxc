@@ -108,6 +108,10 @@ fn err(msg: impl Into<String>) -> InterpretError {
     }
 }
 
+/// paxr iteration cap for Until loops. Matches PA's default `limit.count`
+/// of 60; guards against infinite loops when the exit condition never fires.
+const UNTIL_ITERATION_CAP: u32 = 60;
+
 fn err_at(msg: impl Into<String>, span: Span) -> InterpretError {
     InterpretError {
         message: msg.into(),
@@ -434,6 +438,45 @@ impl<'src> Interpreter<'src> {
                 self.indent += 1;
                 self.run_actions(body, false)?;
                 self.indent -= 1;
+            }
+            ActionKind::Until {
+                condition,
+                condition_span,
+                body,
+            } => {
+                let source = source_slice(self.src, *condition_span);
+                self.trace(&format!("until {} (exit: {source})", action.name));
+                let mut iters = 0u32;
+                loop {
+                    if self.halted {
+                        break;
+                    }
+                    self.indent += 1;
+                    self.trace(&format!("iter[{iters}]"));
+                    self.run_actions(body, false)?;
+                    self.indent -= 1;
+                    if self.halted {
+                        break;
+                    }
+                    let exit = self.eval(condition)?.as_bool().unwrap_or(false);
+                    self.trace(&format!(
+                        "until? ({source}) = {exit}"
+                    ));
+                    if exit {
+                        break;
+                    }
+                    iters += 1;
+                    if iters >= UNTIL_ITERATION_CAP {
+                        // Match PA semantics: at the limit, exit the loop.
+                        // Surface a notice so the user sees why execution
+                        // stopped short of the exit condition.
+                        self.print_notice(&format!(
+                            "<until \"{}\" hit iteration cap of {}>",
+                            action.name, UNTIL_ITERATION_CAP
+                        ));
+                        break;
+                    }
+                }
             }
             ActionKind::Switch {
                 subject,
@@ -1470,6 +1513,62 @@ mod tests {
             }
             _ => panic!("expected string"),
         }
+    }
+
+    #[test]
+    fn slice29_until_runs_body_at_least_once() {
+        // Condition already true on entry -- body still runs once, then
+        // the loop exits.
+        let state = run(
+            r#"var n: int = 10
+until n > 5 {
+  n += 1
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(state.vars.get("n"), Some(Value::Int(11))));
+    }
+
+    #[test]
+    fn slice29_until_exits_when_condition_becomes_true() {
+        let state = run(
+            r#"var n: int = 0
+until n >= 3 {
+  n += 1
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(state.vars.get("n"), Some(Value::Int(3))));
+    }
+
+    #[test]
+    fn slice29_until_iteration_cap_stops_runaway() {
+        // Exit condition never becomes true; loop must stop at the cap and
+        // not error. After 60 iterations, n has been incremented 60 times.
+        let state = run(
+            r#"var n: int = 0
+until false {
+  n += 1
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            state.vars.get("n"),
+            Some(Value::Int(n)) if *n == UNTIL_ITERATION_CAP as i64
+        ));
+    }
+
+    #[test]
+    fn slice29_terminate_in_until_body_halts_loop() {
+        let state = run(
+            r#"var n: int = 0
+until n >= 100 {
+  n += 1
+  if n == 4 { terminate failed "stop" }
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(state.vars.get("n"), Some(Value::Int(4))));
     }
 
     #[test]

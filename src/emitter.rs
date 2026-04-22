@@ -65,6 +65,9 @@ pub fn count_debug_actions(actions: &[ResolvedAction]) -> usize {
             ActionKind::Scope { body } => {
                 n += count_debug_actions(body);
             }
+            ActionKind::Until { body, .. } => {
+                n += count_debug_actions(body);
+            }
             _ => {}
         }
     }
@@ -138,6 +141,9 @@ fn emit_action(action: &ResolvedAction) -> Value {
             ..
         } => emit_switch(subject, cases, default.as_deref()),
         ActionKind::Scope { body } => emit_scope(body),
+        ActionKind::Until {
+            condition, body, ..
+        } => emit_until(condition, body),
     };
     splice_run_after(body, &action.run_after)
 }
@@ -145,6 +151,32 @@ fn emit_action(action: &ResolvedAction) -> Value {
 fn emit_scope(body: &[ResolvedAction]) -> Value {
     json!({
         "type": "Scope",
+        "actions": build_actions_map(body),
+    })
+}
+
+/// PA requires `limit.count` and `limit.timeout` on every Until. paxc emits
+/// PA's own defaults (60 iterations, 1 hour) so surfaces stay consistent.
+/// User-tunable limits are a future extension (e.g. `until cond max 100 { ... }`).
+const UNTIL_DEFAULT_COUNT: u32 = 60;
+const UNTIL_DEFAULT_TIMEOUT: &str = "PT1H";
+
+fn emit_until(condition: &Expr, body: &[ResolvedAction]) -> Value {
+    // PA's Until expression is the exit condition; same auto-wrap rule as
+    // If -- if the outer expression is already boolean (comparison / logical
+    // op), skip the `equals(_, true)` wrap.
+    let expression = if is_boolean_expr(condition) {
+        format!("@{}", pa_expr(condition))
+    } else {
+        format!("@equals({}, true)", pa_expr(condition))
+    };
+    json!({
+        "type": "Until",
+        "expression": expression,
+        "limit": {
+            "count": UNTIL_DEFAULT_COUNT,
+            "timeout": UNTIL_DEFAULT_TIMEOUT,
+        },
         "actions": build_actions_map(body),
     })
 }
@@ -814,6 +846,44 @@ msg &= "!""#,
         assert!(msg.starts_with("@"), "expected PA expression wrapping, got {msg}");
         assert!(msg.contains("concat"));
         assert!(msg.contains("failed at"));
+    }
+
+    #[test]
+    fn slice29_until_emits_pa_until_action() {
+        let out = compile(
+            r#"var n: int = 0
+until n > 5 {
+  n += 1
+}"#,
+        );
+        let u = &out["definition"]["actions"]["Until"];
+        assert_eq!(u["type"], "Until");
+        // Comparison op is already boolean -> no equals(_, true) auto-wrap.
+        assert_eq!(
+            u["expression"].as_str().unwrap(),
+            "@greater(variables('n'), 5)"
+        );
+        // PA defaults: 60 iterations, PT1H.
+        assert_eq!(u["limit"]["count"], 60);
+        assert_eq!(u["limit"]["timeout"], "PT1H");
+        // Body action nested inside Until, not at top level.
+        let actions = out["definition"]["actions"].as_object().unwrap();
+        assert!(!actions.contains_key("Increment_n"));
+        assert!(u["actions"]["Increment_n"].is_object());
+    }
+
+    #[test]
+    fn slice29_until_bare_ref_auto_wraps() {
+        // A non-boolean expression (bare bool ref) gets the equals(_, true)
+        // wrap same as Condition does.
+        let out = compile(
+            r#"var done: bool = false
+until done {
+  done = true
+}"#,
+        );
+        let expr = &out["definition"]["actions"]["Until"]["expression"];
+        assert_eq!(expr.as_str().unwrap(), "@equals(variables('done'), true)");
     }
 
     #[test]

@@ -110,6 +110,20 @@ pub enum Stmt {
         message: Option<Expr>,
         span: Span,
     },
+    /// `until <condition> { body }` -- PA's Until (do-while) loop. The
+    /// condition is the EXIT condition: PA runs the body first, evaluates
+    /// the expression, and exits when it becomes true. paxc emits with PA's
+    /// default limit (60 iterations, PT1H timeout) -- user overrides are
+    /// not exposed in syntax yet.
+    Until {
+        condition: Expr,
+        /// Source span of the condition expression, mirrors `If::condition_span`
+        /// so paxr's verbose trace can show the source slice.
+        condition_span: Span,
+        body: Vec<Stmt>,
+        /// Span of the whole statement, used for runtime-error localization.
+        span: Span,
+    },
     /// `scope [<name>] { ... }` -- a no-op container action that groups
     /// statements. Lowers to PA's Scope action. Body follows the same
     /// nested-statement rules as if/foreach bodies (no nested `var`).
