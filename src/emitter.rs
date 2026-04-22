@@ -5,7 +5,7 @@
 //! an `actions` map. Action keys and `runAfter` predecessors come from the
 //! resolver, so this layer is purely a tree-to-JSON translation.
 
-use crate::ast::{BinOp, Expr, Literal, Trigger, Type, UnaryOp};
+use crate::ast::{BinOp, Expr, Frequency, Literal, Trigger, Type, UnaryOp};
 use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram};
 use serde_json::{Map, Value, json};
 
@@ -69,7 +69,23 @@ fn emit_trigger(trigger: &Trigger) -> Value {
                 "inputs": {}
             }
         }),
+        Trigger::Schedule {
+            frequency,
+            interval,
+        } => emit_schedule_trigger(*frequency, *interval),
     }
+}
+
+fn emit_schedule_trigger(frequency: Frequency, interval: u32) -> Value {
+    json!({
+        "Recurrence": {
+            "type": "Recurrence",
+            "recurrence": {
+                "frequency": frequency.as_pa_str(),
+                "interval": interval,
+            }
+        }
+    })
 }
 
 fn emit_action(action: &ResolvedAction) -> Value {
@@ -645,5 +661,47 @@ msg &= "!""#,
             actions["Initialize_c"]["runAfter"],
             json!({ "Initialize_b": ["Succeeded"] })
         );
+    }
+
+    fn compile_full(src: &str) -> Value {
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        let program = parser()
+            .parse(
+                tokens
+                    .as_slice()
+                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+            )
+            .into_result()
+            .expect("parse failed");
+        let resolved = resolve(&program).expect("resolve failed");
+        emit(&resolved)
+    }
+
+    #[test]
+    fn slice21_schedule_trigger_emits_recurrence() {
+        let out = compile_full("trigger schedule every 5 minutes\nvar x: int = 1");
+        let trig = &out["definition"]["triggers"]["Recurrence"];
+        assert_eq!(trig["type"], "Recurrence");
+        assert_eq!(trig["recurrence"]["frequency"], "Minute");
+        assert_eq!(trig["recurrence"]["interval"], 5);
+    }
+
+    #[test]
+    fn slice21_schedule_trigger_no_manual_keys() {
+        // Ensure the trigger map does not carry over the `manual` key when
+        // a schedule is used.
+        let out = compile_full("trigger schedule every hour\nvar x: int = 1");
+        let triggers = &out["definition"]["triggers"];
+        assert!(triggers.get("manual").is_none());
+        assert!(triggers.get("Recurrence").is_some());
+    }
+
+    #[test]
+    fn slice21_manual_trigger_still_emits_manual() {
+        // Regression: existing manual-trigger behavior unchanged.
+        let out = compile_full("trigger manual\nvar x: int = 1");
+        let trig = &out["definition"]["triggers"]["manual"];
+        assert_eq!(trig["type"], "Request");
+        assert_eq!(trig["kind"], "Button");
     }
 }

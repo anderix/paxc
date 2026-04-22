@@ -24,6 +24,31 @@ pub struct DebugArg {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trigger {
     Manual,
+    Schedule { frequency: Frequency, interval: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Frequency {
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+}
+
+impl Frequency {
+    /// PA's canonical capitalization for the `frequency` field value.
+    pub fn as_pa_str(self) -> &'static str {
+        match self {
+            Frequency::Second => "Second",
+            Frequency::Minute => "Minute",
+            Frequency::Hour => "Hour",
+            Frequency::Day => "Day",
+            Frequency::Week => "Week",
+            Frequency::Month => "Month",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

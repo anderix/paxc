@@ -1,0 +1,17 @@
+// Slice 21: Schedule trigger.
+//
+// Replaces the manual Button trigger with a PA Recurrence trigger. Syntax is
+// `trigger schedule every [N] <unit>`. N defaults to 1 when omitted. Units
+// are second, minute, hour, day, week, month (singular or plural).
+//
+// Emits a PA trigger of type "Recurrence" with a `recurrence` block carrying
+// `frequency` and `interval`. paxr doesn't execute triggers, so this example
+// runs just like a manual-trigger flow under the interpreter.
+
+trigger schedule every 15 minutes
+
+var runs: int = 0
+runs += 1
+
+let message = "sweep fired"
+debug(message, runs)

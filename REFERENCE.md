@@ -40,13 +40,27 @@ Two observations matter here. The `let greeting = ...` line is a Compose in both
 
 ## Triggers
 
-Every pax program starts with a trigger declaration. In v1, the only trigger is `manual`:
+Every pax program starts with a trigger declaration. Two trigger forms are currently supported.
+
+### Manual
 
 ```
 trigger manual
 ```
 
-This compiles to Power Automate's "manually trigger a flow" button. The trigger takes no arguments in its pax form.
+Compiles to Power Automate's "manually trigger a flow" button. The trigger takes no arguments in its pax form.
+
+### Schedule
+
+```
+trigger schedule every 5 minutes
+trigger schedule every hour
+trigger schedule every 2 days
+```
+
+Compiles to Power Automate's Recurrence trigger. The syntax is `trigger schedule every [N] <unit>`. The integer defaults to 1 when omitted. Units are `second`, `minute`, `hour`, `day`, `week`, `month`, with singular and plural forms both accepted. The emitted trigger is a `Recurrence` object with `frequency` (the capitalized unit name) and `interval` (the integer).
+
+Advanced recurrence features such as `startTime`, `timeZone`, and the nested `schedule` object (for patterns like "every Monday at 9am") are not yet modeled in pax syntax. paxr does not execute triggers, so a scheduled flow runs through the interpreter exactly like a manual one.
 
 ## Variables and types
 

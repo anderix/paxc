@@ -3,7 +3,9 @@
 //! Slice 1 recognizes a sequence of `var <ident>: <type> = <literal>`
 //! declarations and builds a `Program` AST.
 
-use crate::ast::{AssignOp, BinOp, DebugArg, Expr, Literal, Program, Stmt, Trigger, Type, UnaryOp};
+use crate::ast::{
+    AssignOp, BinOp, DebugArg, Expr, Frequency, Literal, Program, Stmt, Trigger, Type, UnaryOp,
+};
 use crate::lexer::{Span, Token};
 use chumsky::{input::ValueInput, prelude::*};
 
@@ -327,9 +329,45 @@ where
             .or(assign)
     });
 
-    let trigger = just(Token::Trigger).ignore_then(select! {
-        Token::Ident("manual") => Trigger::Manual,
-    });
+    // Unit keyword → Frequency. Singular and plural both accepted.
+    let frequency_unit = select! {
+        Token::Ident("second") => Frequency::Second,
+        Token::Ident("seconds") => Frequency::Second,
+        Token::Ident("minute") => Frequency::Minute,
+        Token::Ident("minutes") => Frequency::Minute,
+        Token::Ident("hour") => Frequency::Hour,
+        Token::Ident("hours") => Frequency::Hour,
+        Token::Ident("day") => Frequency::Day,
+        Token::Ident("days") => Frequency::Day,
+        Token::Ident("week") => Frequency::Week,
+        Token::Ident("weeks") => Frequency::Week,
+        Token::Ident("month") => Frequency::Month,
+        Token::Ident("months") => Frequency::Month,
+    }
+    .labelled("time unit (second, minute, hour, day, week, or month)");
+
+    // `every [N]? <unit>`: N defaults to 1 when omitted.
+    let schedule_body = select! { Token::Ident("every") => () }
+        .ignore_then(select! { Token::Int(n) => n }.or_not())
+        .then(frequency_unit)
+        .try_map(|(n_opt, frequency), span| {
+            let interval = n_opt.unwrap_or(1);
+            if interval < 1 {
+                return Err(Rich::custom(span, "schedule interval must be at least 1"));
+            }
+            let interval: u32 = interval.try_into().map_err(|_| {
+                Rich::custom(span, "schedule interval is too large (must fit in u32)")
+            })?;
+            Ok(Trigger::Schedule {
+                frequency,
+                interval,
+            })
+        });
+
+    let manual_body = select! { Token::Ident("manual") => Trigger::Manual };
+    let schedule_kw = select! { Token::Ident("schedule") => () }.ignore_then(schedule_body);
+
+    let trigger = just(Token::Trigger).ignore_then(manual_body.or(schedule_kw));
 
     trigger
         .then(stmt.repeated().collect::<Vec<_>>())
@@ -492,5 +530,76 @@ mod tests {
             }
             _ => panic!("expected assign"),
         }
+    }
+
+    fn parse_full(src: &str) -> Program {
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        parser()
+            .parse(
+                tokens
+                    .as_slice()
+                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+            )
+            .into_result()
+            .expect("parse failed")
+    }
+
+    #[test]
+    fn slice21_schedule_trigger_every_n_plural() {
+        let prog = parse_full("trigger schedule every 5 minutes");
+        assert_eq!(
+            prog.trigger,
+            Trigger::Schedule {
+                frequency: Frequency::Minute,
+                interval: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn slice21_schedule_trigger_every_singular_defaults_to_one() {
+        let prog = parse_full("trigger schedule every hour");
+        assert_eq!(
+            prog.trigger,
+            Trigger::Schedule {
+                frequency: Frequency::Hour,
+                interval: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn slice21_schedule_accepts_all_units() {
+        for (src, expected) in [
+            ("trigger schedule every 30 seconds", Frequency::Second),
+            ("trigger schedule every 2 days", Frequency::Day),
+            ("trigger schedule every week", Frequency::Week),
+            ("trigger schedule every 6 months", Frequency::Month),
+        ] {
+            let prog = parse_full(src);
+            match prog.trigger {
+                Trigger::Schedule { frequency, .. } => assert_eq!(frequency, expected),
+                _ => panic!("expected schedule"),
+            }
+        }
+    }
+
+    #[test]
+    fn slice21_schedule_rejects_interval_zero() {
+        let src = "trigger schedule every 0 minutes";
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        let result = parser().parse(
+            tokens
+                .as_slice()
+                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+        );
+        assert!(result.has_errors(), "expected parse error for interval 0");
+    }
+
+    #[test]
+    fn slice21_manual_trigger_still_parses() {
+        let prog = parse_full("trigger manual\nvar x: int = 1");
+        assert_eq!(prog.trigger, Trigger::Manual);
+        assert_eq!(prog.statements.len(), 1);
     }
 }
