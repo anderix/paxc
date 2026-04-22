@@ -13,7 +13,7 @@
 //! to `Null`. This keeps the interpreter focused and avoids reimplementing
 //! PA's 200+ expression functions.
 
-use crate::ast::{BinOp, DebugArg, Expr, Literal, Type, UnaryOp};
+use crate::ast::{BinOp, DebugArg, Expr, HandlerStatus, Literal, Type, UnaryOp};
 use crate::lexer::Span;
 use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram};
 use serde_json::{Map, Value as JsonValue, json};
@@ -438,6 +438,29 @@ impl<'src> Interpreter<'src> {
                 self.indent += 1;
                 self.run_actions(body, false)?;
                 self.indent -= 1;
+            }
+            ActionKind::OnHandler { status, body, .. } => {
+                // paxr walks the happy path: every scope's body succeeds.
+                // Under that assumption, the `on succeeded` handler fires
+                // and its body runs in the local simulation. The other
+                // handler statuses (failed / skipped / timedout) would only
+                // fire on a real PA failure -- paxr has no way to force
+                // one, so it surfaces a notice and skips.
+                match status {
+                    HandlerStatus::Succeeded => {
+                        self.trace(&format!("on succeeded {}", action.name));
+                        self.indent += 1;
+                        self.run_actions(body, false)?;
+                        self.indent -= 1;
+                    }
+                    _ => {
+                        self.print_notice(&format!(
+                            "<skipping on-{} handler \"{}\" (paxr cannot simulate non-success)>",
+                            status.as_label(),
+                            action.name
+                        ));
+                    }
+                }
             }
             ActionKind::Until {
                 condition,
@@ -1513,6 +1536,46 @@ mod tests {
             }
             _ => panic!("expected string"),
         }
+    }
+
+    #[test]
+    fn slice30_on_succeeded_handler_runs_in_paxr_happy_path() {
+        // paxr assumes every scope succeeds, so an `on succeeded` handler
+        // fires locally and its body side-effects are visible.
+        let state = run(
+            r#"var trail: string = ""
+scope work {
+  trail &= "w"
+}
+on succeeded work {
+  trail &= "-ok"
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            state.vars.get("trail"),
+            Some(Value::Str(s)) if s == "w-ok"
+        ));
+    }
+
+    #[test]
+    fn slice30_on_failed_handler_skipped_in_paxr() {
+        // paxr can't simulate failure; `on failed` handlers are announced
+        // and skipped so the state dump matches the happy path.
+        let state = run(
+            r#"var trail: string = ""
+scope work {
+  trail &= "w"
+}
+on failed work {
+  trail &= "-fail"
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            state.vars.get("trail"),
+            Some(Value::Str(s)) if s == "w"
+        ));
     }
 
     #[test]

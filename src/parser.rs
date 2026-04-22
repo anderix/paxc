@@ -4,7 +4,7 @@
 //! declarations and builds a `Program` AST.
 
 use crate::ast::{
-    AssignOp, BinOp, DebugArg, Expr, Frequency, Literal, Program, Stmt, SwitchCase,
+    AssignOp, BinOp, DebugArg, Expr, Frequency, HandlerStatus, Literal, Program, Stmt, SwitchCase,
     TerminateStatus, Trigger, Type, UnaryOp,
 };
 use crate::lexer::{Span, Token};
@@ -384,6 +384,29 @@ where
             .then(default_arm.or_not())
             .delimited_by(just(Token::LBrace), just(Token::RBrace));
 
+        // `on <status> <target> { body }` -- error-path handler attached to a
+        // named scope. Status keyword follows the same ident-select pattern as
+        // terminate's status (not reserved words, just recognized by the parser).
+        let handler_status = select! {
+            Token::Ident("succeeded") => HandlerStatus::Succeeded,
+            Token::Ident("failed") => HandlerStatus::Failed,
+            Token::Ident("skipped") => HandlerStatus::Skipped,
+            Token::Ident("timedout") => HandlerStatus::TimedOut,
+        }
+        .labelled("handler status (succeeded, failed, skipped, or timedout)");
+
+        let on_handler = just(Token::On)
+            .ignore_then(handler_status)
+            .then(name.map_with(|s, e| (s.to_string(), e.span())))
+            .then(block.clone())
+            .map_with(|((status, (target, target_span)), body), e| Stmt::OnHandler {
+                status,
+                target,
+                target_span,
+                body,
+                span: e.span(),
+            });
+
         // `scope [name] { ... }`. The optional name becomes part of the action
         // key. Without one, the resolver auto-suffixes `Scope`, `Scope_1`, ...
         let scope_stmt = just(Token::Scope)
@@ -415,6 +438,7 @@ where
             .or(until_stmt)
             .or(switch_stmt)
             .or(scope_stmt)
+            .or(on_handler)
             .or(raw_stmt)
             .or(debug_stmt)
             .or(terminate_stmt)
@@ -790,6 +814,54 @@ mod tests {
             }
             _ => panic!("expected until"),
         }
+    }
+
+    #[test]
+    fn slice30_on_handler_parses() {
+        let prog = parse(
+            r#"scope try_work {
+  var x: int = 1
+}
+on failed try_work {
+}"#,
+        );
+        match &prog.statements[1] {
+            Stmt::OnHandler { status, target, body, .. } => {
+                assert_eq!(*status, HandlerStatus::Failed);
+                assert_eq!(target, "try_work");
+                assert!(body.is_empty());
+            }
+            _ => panic!("expected OnHandler"),
+        }
+    }
+
+    #[test]
+    fn slice30_on_handler_all_statuses_parse() {
+        for (kw, expected) in [
+            ("succeeded", HandlerStatus::Succeeded),
+            ("failed", HandlerStatus::Failed),
+            ("skipped", HandlerStatus::Skipped),
+            ("timedout", HandlerStatus::TimedOut),
+        ] {
+            let src = format!("scope foo {{\n}}\non {kw} foo {{\n}}");
+            let prog = parse(&src);
+            match &prog.statements[1] {
+                Stmt::OnHandler { status, .. } => assert_eq!(*status, expected, "kw: {kw}"),
+                _ => panic!("expected OnHandler for {kw}"),
+            }
+        }
+    }
+
+    #[test]
+    fn slice30_on_handler_unknown_status_is_parse_error() {
+        let src = "trigger manual\nscope foo {}\non weird foo {\n}";
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        let result = parser().parse(
+            tokens
+                .as_slice()
+                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+        );
+        assert!(result.has_errors());
     }
 
     #[test]

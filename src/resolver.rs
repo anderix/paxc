@@ -12,7 +12,7 @@
 //! action key), so the emitter never sees an unresolved reference.
 
 use crate::ast::{
-    AssignOp, DebugArg, Expr, Literal, Program, Stmt, TerminateStatus, Trigger, Type,
+    AssignOp, DebugArg, Expr, HandlerStatus, Literal, Program, Stmt, TerminateStatus, Trigger, Type,
 };
 use crate::lexer::Span;
 use std::collections::HashMap;
@@ -27,11 +27,33 @@ pub struct ResolvedProgram {
 #[derive(Debug, Clone)]
 pub struct ResolvedAction {
     pub name: String,
-    pub run_after: Vec<String>,
+    pub run_after: Vec<RunAfterEntry>,
     pub kind: ActionKind,
     /// Span of the source statement. paxr uses this to attribute runtime
     /// errors back to the originating statement in diagnostic output.
     pub span: Span,
+}
+
+/// One predecessor in PA's `runAfter` map: an action name plus the statuses
+/// under which it triggers this action. Most entries are built via
+/// [`RunAfterEntry::succeeded`] (the source-order sibling chain); error-path
+/// handlers (`on failed foo { ... }`) use other statuses.
+#[derive(Debug, Clone)]
+pub struct RunAfterEntry {
+    pub action_name: String,
+    /// PA-capitalized statuses: `Succeeded`, `Failed`, `Skipped`, `TimedOut`.
+    pub statuses: Vec<String>,
+}
+
+impl RunAfterEntry {
+    /// The default sibling-chain edge: "this action runs after <name> has
+    /// succeeded." Used by the source-order runAfter chain.
+    pub fn succeeded(action_name: String) -> Self {
+        Self {
+            action_name,
+            statuses: vec!["Succeeded".to_string()],
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +138,19 @@ pub enum ActionKind {
         condition_span: Span,
         body: Vec<ResolvedAction>,
     },
+    /// `on <status> <target> { body }` -- handler attached to a named scope
+    /// (or, in the future, any named action). Compiles to a PA Scope action
+    /// whose `runAfter` points at the target with a single status. The
+    /// handler does not participate in the source-order sibling chain: the
+    /// resolver skips updating `prev_name` when emitting it, so the next
+    /// real statement chains back to whatever came before.
+    OnHandler {
+        status: HandlerStatus,
+        /// PA action name of the target (e.g. `Scope_try_work`), already
+        /// resolved from the source-level label (`try_work`).
+        target_action_name: String,
+        body: Vec<ResolvedAction>,
+    },
     /// `switch subject { case L { ... } ... default { ... } }`. Each case
     /// has a literal value and a resolved body; `default` is `None` when the
     /// source omitted the default arm.
@@ -157,6 +192,10 @@ pub enum ResolveError {
     /// so nesting one inside a Condition or Apply_to_each produces an
     /// invalid definition.
     NestedVarDeclaration { name: String, span: Span },
+    /// `on <status> <target> { ... }` named a target that no named scope
+    /// resolves to. Future versions may allow raw blocks or other named
+    /// actions as targets too; for now only `scope <name>` registers.
+    UnknownHandlerTarget { name: String, span: Span },
 }
 
 impl ResolveError {
@@ -166,7 +205,8 @@ impl ResolveError {
             | ResolveError::UndefinedVariable { span, .. }
             | ResolveError::InvalidOperation { span, .. }
             | ResolveError::CannotAssignToImmutable { span, .. }
-            | ResolveError::NestedVarDeclaration { span, .. } => *span,
+            | ResolveError::NestedVarDeclaration { span, .. }
+            | ResolveError::UnknownHandlerTarget { span, .. } => *span,
         }
     }
 
@@ -178,6 +218,7 @@ impl ResolveError {
             ResolveError::InvalidOperation { .. } => "invalid operation",
             ResolveError::CannotAssignToImmutable { .. } => "immutable binding",
             ResolveError::NestedVarDeclaration { .. } => "must be top-level",
+            ResolveError::UnknownHandlerTarget { .. } => "not a named scope",
         }
     }
 }
@@ -216,6 +257,12 @@ impl fmt::Display for ResolveError {
                     "`var {name}` must be declared at the top level of the flow"
                 )
             }
+            ResolveError::UnknownHandlerTarget { name, .. } => {
+                write!(
+                    f,
+                    "`{name}` is not a named scope; `on` handlers attach to `scope <name> {{ ... }}`"
+                )
+            }
         }
     }
 }
@@ -235,7 +282,17 @@ fn type_name(ty: &Type) -> &'static str {
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
     let mut env: HashMap<String, Binding> = HashMap::new();
     let mut name_counts: HashMap<String, u32> = HashMap::new();
-    let actions = resolve_statements(&program.statements, &mut env, &mut name_counts, true)?;
+    // Source name -> PA action name for every user-labeled scope. Populated
+    // as we resolve each `scope <name> { ... }`; consumed when an `on` handler
+    // references a target by name.
+    let mut named_scopes: HashMap<String, String> = HashMap::new();
+    let actions = resolve_statements(
+        &program.statements,
+        &mut env,
+        &mut name_counts,
+        &mut named_scopes,
+        true,
+    )?;
     Ok(ResolvedProgram {
         trigger: program.trigger.clone(),
         actions,
@@ -249,6 +306,7 @@ fn resolve_statements(
     statements: &[Stmt],
     env: &mut HashMap<String, Binding>,
     name_counts: &mut HashMap<String, u32>,
+    named_scopes: &mut HashMap<String, String>,
     top_level: bool,
 ) -> Result<Vec<ResolvedAction>, ResolveError> {
     let mut actions: Vec<ResolvedAction> = Vec::with_capacity(statements.len());
@@ -343,10 +401,10 @@ fn resolve_statements(
                 // stays shared since PA action names are globally unique.
                 let saved_env = env.clone();
                 let true_actions =
-                    resolve_statements(true_branch, env, name_counts, false)?;
+                    resolve_statements(true_branch, env, name_counts, named_scopes, false)?;
                 *env = saved_env.clone();
                 let false_actions =
-                    resolve_statements(false_branch, env, name_counts, false)?;
+                    resolve_statements(false_branch, env, name_counts, named_scopes, false)?;
                 *env = saved_env;
                 (
                     action_name,
@@ -376,7 +434,7 @@ fn resolve_statements(
                     },
                 );
                 let body_actions =
-                    resolve_statements(body, env, name_counts, false)?;
+                    resolve_statements(body, env, name_counts, named_scopes, false)?;
                 *env = saved_env;
                 (
                     action_name,
@@ -413,7 +471,7 @@ fn resolve_statements(
                 let action_name = unique_name("Until", name_counts);
                 // Body scopes lets to itself, same as foreach/if-branches.
                 let saved_env = env.clone();
-                let body_actions = resolve_statements(body, env, name_counts, false)?;
+                let body_actions = resolve_statements(body, env, name_counts, named_scopes, false)?;
                 *env = saved_env;
                 (
                     action_name,
@@ -435,11 +493,50 @@ fn resolve_statements(
                     None => "Scope".to_string(),
                 };
                 let action_name = unique_name(&base, name_counts);
+                // Register named scopes so `on <status> <name>` handlers can
+                // resolve the source label to a PA action name. Duplicate
+                // source names silently overwrite (first one wins would be
+                // odd -- PA's own action names stay unique via suffixing, so
+                // a handler attaches to the most recent declaration). Not
+                // ideal; may revisit with a duplicate-name diagnostic.
+                if let Some(n) = scope_name {
+                    named_scopes.insert(n.clone(), action_name.clone());
+                }
                 // Scope body scopes its own `let` bindings like if/foreach.
                 let saved_env = env.clone();
-                let body_actions = resolve_statements(body, env, name_counts, false)?;
+                let body_actions = resolve_statements(body, env, name_counts, named_scopes, false)?;
                 *env = saved_env;
                 (action_name, ActionKind::Scope { body: body_actions }, *span)
+            }
+            Stmt::OnHandler {
+                status,
+                target,
+                target_span,
+                body,
+                span,
+            } => {
+                let target_action_name = named_scopes.get(target).cloned().ok_or_else(|| {
+                    ResolveError::UnknownHandlerTarget {
+                        name: target.clone(),
+                        span: *target_span,
+                    }
+                })?;
+                let action_name = unique_name(
+                    &format!("On_{}_{target}", status.as_label()),
+                    name_counts,
+                );
+                let saved_env = env.clone();
+                let body_actions = resolve_statements(body, env, name_counts, named_scopes, false)?;
+                *env = saved_env;
+                (
+                    action_name,
+                    ActionKind::OnHandler {
+                        status: *status,
+                        target_action_name,
+                        body: body_actions,
+                    },
+                    *span,
+                )
             }
             Stmt::Switch {
                 subject,
@@ -458,7 +555,7 @@ fn resolve_statements(
                 for case in cases {
                     let case_action_name = unique_name("Case", name_counts);
                     *env = saved_env.clone();
-                    let body = resolve_statements(&case.body, env, name_counts, false)?;
+                    let body = resolve_statements(&case.body, env, name_counts, named_scopes, false)?;
                     resolved_cases.push(ResolvedSwitchCase {
                         action_name: case_action_name,
                         value: case.value.clone(),
@@ -468,7 +565,7 @@ fn resolve_statements(
                 let resolved_default = match default {
                     Some(stmts) => {
                         *env = saved_env.clone();
-                        Some(resolve_statements(stmts, env, name_counts, false)?)
+                        Some(resolve_statements(stmts, env, name_counts, named_scopes, false)?)
                     }
                     None => None,
                 };
@@ -514,8 +611,30 @@ fn resolve_statements(
             continue;
         }
 
+        // `on` handlers are off the main sibling chain: their runAfter points
+        // at their target + filter status (set here), and the statement after
+        // the handler chains back to whatever came before, not the handler.
+        if let ActionKind::OnHandler {
+            status,
+            target_action_name,
+            ..
+        } = &kind
+        {
+            let entry = RunAfterEntry {
+                action_name: target_action_name.clone(),
+                statuses: vec![status.as_pa_str().to_string()],
+            };
+            actions.push(ResolvedAction {
+                name: action_name,
+                run_after: vec![entry],
+                kind,
+                span: stmt_span,
+            });
+            continue;
+        }
+
         let run_after = match &prev_name {
-            Some(n) => vec![n.clone()],
+            Some(n) => vec![RunAfterEntry::succeeded(n.clone())],
             None => Vec::new(),
         };
         prev_name = Some(action_name.clone());
@@ -733,11 +852,13 @@ mod tests {
             "debug action should have empty runAfter"
         );
         assert_eq!(resolved.actions[2].name, "Initialize_b");
+        let after = &resolved.actions[2].run_after;
+        assert_eq!(after.len(), 1, "expected one predecessor");
         assert_eq!(
-            resolved.actions[2].run_after,
-            vec!["Initialize_a"],
+            after[0].action_name, "Initialize_a",
             "action after debug must chain back to prior real action"
         );
+        assert_eq!(after[0].statuses, vec!["Succeeded".to_string()]);
     }
 
     #[test]
@@ -751,9 +872,9 @@ mod tests {
         assert_eq!(resolved.actions[0].name, "Initialize_a");
         assert!(resolved.actions[0].run_after.is_empty());
         assert_eq!(resolved.actions[1].name, "Initialize_b");
-        assert_eq!(resolved.actions[1].run_after, vec!["Initialize_a"]);
+        assert_eq!(resolved.actions[1].run_after[0].action_name, "Initialize_a");
         assert_eq!(resolved.actions[2].name, "Initialize_c");
-        assert_eq!(resolved.actions[2].run_after, vec!["Initialize_b"]);
+        assert_eq!(resolved.actions[2].run_after[0].action_name, "Initialize_b");
     }
 
     #[test]
@@ -1144,6 +1265,102 @@ mod tests {
             ],
         };
         assert!(resolve(&prog).is_ok());
+    }
+
+    #[test]
+    fn slice30_on_handler_resolves_target_to_action_name() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                Stmt::Scope {
+                    name: Some("try_work".to_string()),
+                    body: vec![],
+                    span: sp(),
+                },
+                Stmt::OnHandler {
+                    status: HandlerStatus::Failed,
+                    target: "try_work".to_string(),
+                    target_span: sp(),
+                    body: vec![],
+                    span: sp(),
+                },
+            ],
+        };
+        let resolved = resolve(&prog).unwrap();
+        assert_eq!(resolved.actions[0].name, "Scope_try_work");
+        assert_eq!(resolved.actions[1].name, "On_failed_try_work");
+        match &resolved.actions[1].kind {
+            ActionKind::OnHandler {
+                status,
+                target_action_name,
+                ..
+            } => {
+                assert_eq!(*status, HandlerStatus::Failed);
+                assert_eq!(target_action_name, "Scope_try_work");
+            }
+            _ => panic!("expected OnHandler"),
+        }
+        // RunAfter points at Scope_try_work with Failed status.
+        assert_eq!(resolved.actions[1].run_after.len(), 1);
+        assert_eq!(
+            resolved.actions[1].run_after[0].action_name,
+            "Scope_try_work"
+        );
+        assert_eq!(
+            resolved.actions[1].run_after[0].statuses,
+            vec!["Failed".to_string()]
+        );
+    }
+
+    #[test]
+    fn slice30_unknown_handler_target_errors() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![Stmt::OnHandler {
+                status: HandlerStatus::Failed,
+                target: "nope".to_string(),
+                target_span: sp(),
+                body: vec![],
+                span: sp(),
+            }],
+        };
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::UnknownHandlerTarget { name, .. } if name == "nope"
+        ));
+    }
+
+    #[test]
+    fn slice30_handler_does_not_participate_in_sibling_chain() {
+        // A handler between two regular actions must not appear in the next
+        // action's runAfter. The next action chains back to the scope (the
+        // last real action on the main path).
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                Stmt::Scope {
+                    name: Some("work".to_string()),
+                    body: vec![],
+                    span: sp(),
+                },
+                Stmt::OnHandler {
+                    status: HandlerStatus::Failed,
+                    target: "work".to_string(),
+                    target_span: sp(),
+                    body: vec![],
+                    span: sp(),
+                },
+                var("after"),
+            ],
+        };
+        let resolved = resolve(&prog).unwrap();
+        assert_eq!(resolved.actions[2].name, "Initialize_after");
+        assert_eq!(resolved.actions[2].run_after.len(), 1);
+        assert_eq!(
+            resolved.actions[2].run_after[0].action_name,
+            "Scope_work",
+            "next action must chain to the scope, not the handler"
+        );
     }
 
     #[test]

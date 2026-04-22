@@ -110,6 +110,22 @@ pub enum Stmt {
         message: Option<Expr>,
         span: Span,
     },
+    /// `on <status> <target> { body }` -- error-path (or success-path)
+    /// handler attached to a named scope. Compiles to a PA Scope action
+    /// with a `runAfter` pointing at the target under the given status.
+    /// The handler does NOT become part of the source-order sibling chain;
+    /// statements following the handler chain their runAfter back to the
+    /// last real action before any handlers, like `debug()` does.
+    OnHandler {
+        status: HandlerStatus,
+        target: String,
+        /// Span of the target identifier, used by the resolver's diagnostic
+        /// when the target is unknown.
+        target_span: Span,
+        body: Vec<Stmt>,
+        /// Span of the whole statement, used for runtime-error localization.
+        span: Span,
+    },
     /// `until <condition> { body }` -- PA's Until (do-while) loop. The
     /// condition is the EXIT condition: PA runs the body first, evaluates
     /// the expression, and exits when it becomes true. paxc emits with PA's
@@ -160,6 +176,37 @@ pub struct SwitchCase {
     pub body: Vec<Stmt>,
     /// Span of the case keyword + value, used for diagnostics.
     pub span: Span,
+}
+
+/// Status filter for an `on` handler. Maps to PA's runAfter status values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandlerStatus {
+    Succeeded,
+    Failed,
+    Skipped,
+    TimedOut,
+}
+
+impl HandlerStatus {
+    /// PA-canonical capitalization for the runAfter status array.
+    pub fn as_pa_str(self) -> &'static str {
+        match self {
+            HandlerStatus::Succeeded => "Succeeded",
+            HandlerStatus::Failed => "Failed",
+            HandlerStatus::Skipped => "Skipped",
+            HandlerStatus::TimedOut => "TimedOut",
+        }
+    }
+
+    /// Lowercase label used in paxr trace / notice output.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            HandlerStatus::Succeeded => "succeeded",
+            HandlerStatus::Failed => "failed",
+            HandlerStatus::Skipped => "skipped",
+            HandlerStatus::TimedOut => "timedout",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

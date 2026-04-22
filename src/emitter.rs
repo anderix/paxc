@@ -6,7 +6,9 @@
 //! resolver, so this layer is purely a tree-to-JSON translation.
 
 use crate::ast::{BinOp, Expr, Frequency, Literal, TerminateStatus, Trigger, Type, UnaryOp};
-use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram, ResolvedSwitchCase};
+use crate::resolver::{
+    ActionKind, ResolvedAction, ResolvedProgram, ResolvedSwitchCase, RunAfterEntry,
+};
 use serde_json::{Map, Value, json};
 
 const SCHEMA_URL: &str =
@@ -66,6 +68,9 @@ pub fn count_debug_actions(actions: &[ResolvedAction]) -> usize {
                 n += count_debug_actions(body);
             }
             ActionKind::Until { body, .. } => {
+                n += count_debug_actions(body);
+            }
+            ActionKind::OnHandler { body, .. } => {
                 n += count_debug_actions(body);
             }
             _ => {}
@@ -144,6 +149,7 @@ fn emit_action(action: &ResolvedAction) -> Value {
         ActionKind::Until {
             condition, body, ..
         } => emit_until(condition, body),
+        ActionKind::OnHandler { body, .. } => emit_scope(body),
     };
     splice_run_after(body, &action.run_after)
 }
@@ -409,10 +415,10 @@ fn literal_to_json(lit: &Literal) -> Value {
     }
 }
 
-fn splice_run_after(mut action_body: Value, predecessors: &[String]) -> Value {
+fn splice_run_after(mut action_body: Value, predecessors: &[RunAfterEntry]) -> Value {
     let mut run_after = Map::new();
-    for pred in predecessors {
-        run_after.insert(pred.clone(), json!(["Succeeded"]));
+    for entry in predecessors {
+        run_after.insert(entry.action_name.clone(), json!(entry.statuses));
     }
     if let Value::Object(ref mut map) = action_body {
         map.insert("runAfter".to_string(), Value::Object(run_after));
@@ -884,6 +890,83 @@ until done {
         );
         let expr = &out["definition"]["actions"]["Until"]["expression"];
         assert_eq!(expr.as_str().unwrap(), "@equals(variables('done'), true)");
+    }
+
+    #[test]
+    fn slice30_on_handler_emits_scope_with_runafter_status() {
+        let out = compile(
+            r#"var count: int = 0
+scope try_work {
+  count = 1
+}
+on failed try_work {
+  count = 99
+}"#,
+        );
+        let actions = out["definition"]["actions"].as_object().unwrap();
+        assert!(actions.contains_key("Scope_try_work"));
+        assert!(actions.contains_key("On_failed_try_work"));
+        let handler = &actions["On_failed_try_work"];
+        assert_eq!(handler["type"], "Scope");
+        assert_eq!(
+            handler["runAfter"],
+            json!({ "Scope_try_work": ["Failed"] }),
+            "handler runs after target on Failed only"
+        );
+        // Handler body lives nested inside it, not at top level.
+        assert!(handler["actions"]["Set_count_1"].is_object());
+    }
+
+    #[test]
+    fn slice30_succeeded_handler_emits_succeeded_status() {
+        let out = compile(
+            r#"scope work {
+}
+on succeeded work {
+}"#,
+        );
+        let handler = &out["definition"]["actions"]["On_succeeded_work"];
+        assert_eq!(
+            handler["runAfter"],
+            json!({ "Scope_work": ["Succeeded"] })
+        );
+    }
+
+    #[test]
+    fn slice30_handler_does_not_join_main_chain() {
+        let out = compile(
+            r#"var n: int = 0
+scope work {
+}
+on failed work {
+}
+n = 42"#,
+        );
+        let actions = &out["definition"]["actions"];
+        // The Set_n after the handler must chain back to Scope_work, not to
+        // the handler.
+        assert_eq!(
+            actions["Set_n"]["runAfter"],
+            json!({ "Scope_work": ["Succeeded"] })
+        );
+    }
+
+    #[test]
+    fn slice30_multiple_handlers_on_same_scope() {
+        let out = compile(
+            r#"scope work {
+}
+on failed work {
+}
+on succeeded work {
+}
+on timedout work {
+}"#,
+        );
+        let actions = out["definition"]["actions"].as_object().unwrap();
+        assert!(actions.contains_key("On_failed_work"));
+        assert!(actions.contains_key("On_succeeded_work"));
+        assert!(actions.contains_key("On_timedout_work"));
     }
 
     #[test]

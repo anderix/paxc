@@ -1,0 +1,59 @@
+// Slice 30: error-path runAfter via `on <status> <scope>` handlers.
+//
+// An `on` handler attaches to a named `scope` block and runs when the
+// scope reports the matching status: succeeded, failed, skipped, or
+// timedout. Compiles to a PA Scope action whose `runAfter` points at the
+// target scope with the chosen status.
+//
+// Handlers are off the main sibling chain: statements after a handler
+// chain their runAfter to the last real action BEFORE any handlers, not
+// to the handler itself. That way "normal path" flows through the scope,
+// and handlers are side-attached safety nets.
+//
+// paxr simulates the happy path: `on succeeded` handlers fire, the others
+// are announced and skipped because paxr cannot force a PA failure.
+
+trigger manual
+
+var trail: string = ""
+
+// Classic try/catch shape: a scope that may fail (here the raw HTTP call
+// is just a placeholder so paxr can see the scope body as a skip), with
+// both failure and success handlers attached.
+scope fetch_data {
+    trail &= "fetch"
+    raw HTTP_Get_Data {
+        "type": "Http",
+        "inputs": {
+            "method": "GET",
+            "uri": "https://api.example.com/data"
+        }
+    }
+}
+
+on failed fetch_data {
+    trail &= " [failed]"
+}
+
+on succeeded fetch_data {
+    trail &= " [ok]"
+}
+
+// Multiple handlers on the same scope with different statuses get unique
+// action names automatically.
+scope long_task {
+    trail &= " | long_task"
+}
+
+on timedout long_task {
+    trail &= " [timed out]"
+}
+
+on skipped long_task {
+    trail &= " [skipped]"
+}
+
+// Statements after handlers chain to the scope, not to the handlers --
+// so the "normal path" flows: init trail -> scope fetch_data -> scope
+// long_task -> this debug call.
+debug(trail)
