@@ -396,16 +396,25 @@ fn resolve_statements(
             } => {
                 let condition = resolve_expr(condition, env)?;
                 let action_name = unique_name("Condition", name_counts);
-                // Branches scope `let` bindings to themselves: save the env,
-                // resolve each branch against it, restore after. name_counts
-                // stays shared since PA action names are globally unique.
+                // Branches scope `let` bindings and named-scope registrations
+                // to themselves: save both, resolve each branch against them,
+                // restore after. name_counts stays shared since PA action
+                // names are globally unique. Rolling back named_scopes here
+                // matters because a `scope foo { }` inside a branch creates
+                // a PA action nested in the Condition -- letting `foo` leak
+                // to outer resolution would allow an `on failed foo` at top
+                // level to emit a runAfter targeting an action that isn't
+                // at workflow root, which PA rejects on import.
                 let saved_env = env.clone();
+                let saved_named_scopes = named_scopes.clone();
                 let true_actions =
                     resolve_statements(true_branch, env, name_counts, named_scopes, false)?;
                 *env = saved_env.clone();
+                *named_scopes = saved_named_scopes.clone();
                 let false_actions =
                     resolve_statements(false_branch, env, name_counts, named_scopes, false)?;
                 *env = saved_env;
+                *named_scopes = saved_named_scopes;
                 (
                     action_name,
                     ActionKind::Condition {
@@ -426,7 +435,9 @@ fn resolve_statements(
                 let collection = resolve_expr(collection, env)?;
                 let action_name = unique_name("Apply_to_each", name_counts);
                 // Iterator and any body-local `let` are scoped to the loop body.
+                // Same named_scopes rollback rationale as the Condition arm.
                 let saved_env = env.clone();
+                let saved_named_scopes = named_scopes.clone();
                 env.insert(
                     iter.clone(),
                     Binding::Iterator {
@@ -436,6 +447,7 @@ fn resolve_statements(
                 let body_actions =
                     resolve_statements(body, env, name_counts, named_scopes, false)?;
                 *env = saved_env;
+                *named_scopes = saved_named_scopes;
                 (
                     action_name,
                     ActionKind::Foreach {
@@ -469,10 +481,13 @@ fn resolve_statements(
             } => {
                 let condition = resolve_expr(condition, env)?;
                 let action_name = unique_name("Until", name_counts);
-                // Body scopes lets to itself, same as foreach/if-branches.
+                // Body scopes lets and named-scope registrations to itself,
+                // same as foreach/if-branches.
                 let saved_env = env.clone();
+                let saved_named_scopes = named_scopes.clone();
                 let body_actions = resolve_statements(body, env, name_counts, named_scopes, false)?;
                 *env = saved_env;
+                *named_scopes = saved_named_scopes;
                 (
                     action_name,
                     ActionKind::Until {
@@ -502,10 +517,16 @@ fn resolve_statements(
                 if let Some(n) = scope_name {
                     named_scopes.insert(n.clone(), action_name.clone());
                 }
-                // Scope body scopes its own `let` bindings like if/foreach.
+                // Scope body scopes its own `let` bindings and inner named-
+                // scope registrations like if/foreach. The scope name we
+                // just registered was added BEFORE the clone, so it stays
+                // visible to siblings after this scope returns -- only names
+                // registered *inside* the body get rolled back.
                 let saved_env = env.clone();
+                let saved_named_scopes = named_scopes.clone();
                 let body_actions = resolve_statements(body, env, name_counts, named_scopes, false)?;
                 *env = saved_env;
+                *named_scopes = saved_named_scopes;
                 (action_name, ActionKind::Scope { body: body_actions }, *span)
             }
             Stmt::OnHandler {
@@ -525,9 +546,13 @@ fn resolve_statements(
                     &format!("On_{}_{target}", status.as_label()),
                     name_counts,
                 );
+                // Handler body scopes its own registrations like any other
+                // block. Same rationale as Condition/Foreach/Until.
                 let saved_env = env.clone();
+                let saved_named_scopes = named_scopes.clone();
                 let body_actions = resolve_statements(body, env, name_counts, named_scopes, false)?;
                 *env = saved_env;
+                *named_scopes = saved_named_scopes;
                 (
                     action_name,
                     ActionKind::OnHandler {
@@ -547,14 +572,17 @@ fn resolve_statements(
             } => {
                 let subject = resolve_expr(subject, env)?;
                 let action_name = unique_name("Switch", name_counts);
-                // Cases and default each scope their `let` bindings to their
-                // own branch, like if/else-branches. Clone the env before
-                // each branch and restore after.
+                // Cases and default each scope their `let` bindings and
+                // named-scope registrations to their own branch, like
+                // if/else-branches. Clone both before each branch and
+                // restore after.
                 let saved_env = env.clone();
+                let saved_named_scopes = named_scopes.clone();
                 let mut resolved_cases = Vec::with_capacity(cases.len());
                 for case in cases {
                     let case_action_name = unique_name("Case", name_counts);
                     *env = saved_env.clone();
+                    *named_scopes = saved_named_scopes.clone();
                     let body = resolve_statements(&case.body, env, name_counts, named_scopes, false)?;
                     resolved_cases.push(ResolvedSwitchCase {
                         action_name: case_action_name,
@@ -565,11 +593,13 @@ fn resolve_statements(
                 let resolved_default = match default {
                     Some(stmts) => {
                         *env = saved_env.clone();
+                        *named_scopes = saved_named_scopes.clone();
                         Some(resolve_statements(stmts, env, name_counts, named_scopes, false)?)
                     }
                     None => None,
                 };
                 *env = saved_env;
+                *named_scopes = saved_named_scopes;
                 (
                     action_name,
                     ActionKind::Switch {
@@ -1328,6 +1358,75 @@ mod tests {
             resolve(&prog).unwrap_err(),
             ResolveError::UnknownHandlerTarget { name, .. } if name == "nope"
         ));
+    }
+
+    #[test]
+    fn slice30_nested_scope_name_does_not_leak_to_outer_handler() {
+        // Regression guard: a scope declared inside an if / foreach / switch
+        // case / until / scope / on-handler body must not be visible as a
+        // target from the enclosing source level. Letting `conditional_work`
+        // leak would emit an `on` handler at workflow root pointing at a
+        // Scope action nested inside the Condition -- invalid PA graph.
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var_ty("flag", Type::Bool),
+                Stmt::If {
+                    condition: rref("flag"),
+                    condition_span: sp(),
+                    true_branch: vec![Stmt::Scope {
+                        name: Some("conditional_work".to_string()),
+                        body: vec![],
+                        span: sp(),
+                    }],
+                    false_branch: vec![],
+                },
+                Stmt::OnHandler {
+                    status: HandlerStatus::Failed,
+                    target: "conditional_work".to_string(),
+                    target_span: sp(),
+                    body: vec![],
+                    span: sp(),
+                },
+            ],
+        };
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::UnknownHandlerTarget { name, .. } if name == "conditional_work"
+        ));
+    }
+
+    #[test]
+    fn slice30_handler_within_same_scope_body_still_resolves() {
+        // Complement to the leak test: a handler that references a sibling
+        // scope declared in the SAME body resolves fine. Named scopes are
+        // visible to siblings within a block; they're rolled back only at
+        // the end of the enclosing block.
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![Stmt::Scope {
+                name: Some("outer".to_string()),
+                body: vec![
+                    Stmt::Scope {
+                        name: Some("inner".to_string()),
+                        body: vec![],
+                        span: sp(),
+                    },
+                    Stmt::OnHandler {
+                        status: HandlerStatus::Failed,
+                        target: "inner".to_string(),
+                        target_span: sp(),
+                        body: vec![],
+                        span: sp(),
+                    },
+                ],
+                span: sp(),
+            }],
+        };
+        assert!(
+            resolve(&prog).is_ok(),
+            "handler on sibling inner scope should resolve"
+        );
     }
 
     #[test]
