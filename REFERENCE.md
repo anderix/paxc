@@ -164,6 +164,28 @@ if all_done {
 
 Each `if` compiles to a Power Automate `Condition` action. When the condition is already a comparison or boolean expression, paxc emits it directly. When it isn't (a function call that returns a value, for example), paxc wraps it with `equals(..., true)` so PA gets the boolean shape it requires. `else if` chains compile to nested Conditions inside the `else` branch.
 
+### switch
+
+```
+switch status {
+  case "active" {
+    label = "ACTIVE"
+  }
+  case "pending" {
+    label = "PENDING"
+  }
+  default {
+    label = "UNKNOWN"
+  }
+}
+```
+
+`switch` dispatches on a subject expression and runs the matching case body, falling through to an optional `default` arm if nothing matches. Compiles to Power Automate's `Switch` action. Case values must be scalar literals (string, int, or bool), which matches the same constraint PA enforces on Switch. Arbitrary expressions are not allowed in the case clause.
+
+The `default` arm is optional. When absent, a switch with no matching case is a no-op and the next statement runs normally.
+
+Each case body is scoped independently: a `let` declared inside one case does not leak to other cases or to the outer scope. Nested `var` declarations are rejected the same way they are inside `if` branches.
+
 ### foreach
 
 ```
@@ -178,6 +200,64 @@ foreach task in tasks {
 ```
 
 `foreach` compiles to a Power Automate `Apply_to_each` action. The iterator name (`task` above) is available by dot-access inside the body. Mutations inside the body operate on enclosing-scope variables, which PA runs serially by default.
+
+### until
+
+```
+var n: int = 0
+until n >= 5 {
+  n += 1
+}
+```
+
+`until` is Power Automate's do-while loop. The condition is the exit condition: the body runs at least once, then the condition evaluates, and the loop exits when the condition becomes true. Compiles to a PA `Until` action.
+
+paxc emits PA's default iteration limit (60) and timeout (`PT1H`, one hour) with every until. User-tunable limits are not yet exposed in pax syntax. paxr caps its own local iteration at 60 too so runaway conditions do not hang the interpreter; when the cap is hit, paxr exits the loop cleanly and prints `<until "Until" hit iteration cap of 60>` so you can tell a capped exit from a normal one.
+
+As with `foreach`, a `terminate` inside the body halts both the loop and the enclosing program, and a `let` declared inside the body is scoped to the body.
+
+### scope
+
+```
+scope try_work {
+  raw HTTP_Get_Data {
+    "type": "Http",
+    "inputs": { "method": "GET", "uri": "https://api.example.com/data" }
+  }
+}
+```
+
+`scope [<name>] { ... }` wraps a block of actions in a single Power Automate `Scope` action. A named scope compiles to action key `Scope_<name>`; an anonymous scope (no label) compiles to `Scope`, auto-suffixed if repeated.
+
+A scope on its own is a no-op container, which matters for two reasons. First, the `runAfter` graph sees the scope as one unit: a statement following the scope chains back to the scope itself rather than to its internal actions, so the graph stays clean regardless of how many steps are inside. Second, scopes are the attachment point for error-path handlers described next.
+
+Scope bodies follow the same nesting rules as `if` and `foreach` bodies: nested `var` is rejected, and `let` bindings are scoped to the body.
+
+### on handlers
+
+```
+scope fetch_data {
+  raw HTTP_Get_Data { ... }
+}
+
+on failed fetch_data {
+  debug("the fetch failed")
+}
+
+on succeeded fetch_data {
+  debug("fetched ok")
+}
+```
+
+`on <status> <target> { ... }` attaches a handler to a named scope. The handler runs when the target scope reports the matching status. Supported statuses are `succeeded`, `failed`, `skipped`, and `timedout`, which mirrors the set Power Automate's own `runAfter` accepts. Each handler compiles to a Power Automate `Scope` action whose `runAfter` points at the target with the single chosen status.
+
+Handlers sit off the main sibling chain. A statement written after any handlers does not chain its `runAfter` through the handlers; it chains back to whatever real action came before them. In the example above, a statement after `on succeeded fetch_data` would chain to `Scope_fetch_data`, not to the handler. The "normal path" of the flow runs through the scope; handlers are side-attached safety nets.
+
+Multiple handlers on the same scope are independent parallel actions in the emitted graph. Handler action names follow the pattern `On_<status>_<target>` (for example, `On_failed_fetch_data`), auto-suffixed if a second handler with the same status and target is declared.
+
+The target of an `on` handler must be a named scope declared somewhere earlier in the source. An unknown target raises a resolve error with a "not a named scope" diagnostic.
+
+paxr walks the happy path, so `on succeeded` handlers fire locally and their side effects appear in the end-of-run state dump. The other statuses (`failed`, `skipped`, `timedout`) cannot be triggered from the interpreter, so paxr prints `<skipping on-<status> handler "...">` and moves on without executing them. The compiled flow in Power Automate still dispatches them correctly at runtime.
 
 ### terminate
 
@@ -315,7 +395,7 @@ The section after `end state:` is the end-of-run state dump. The markers next to
 
 Power Automate's flow definition is a map of actions keyed by name, and each action declares a `runAfter` dict listing its predecessors. Writing this by hand means wiring every dependency edge manually and keeping the graph consistent as the flow changes. pax infers the graph from source order: each statement's `runAfter` is the name of the immediately preceding statement, and the first statement has an empty `runAfter` (meaning "run after the trigger fires").
 
-This rule applies recursively inside control flow. Inside an `if` body, statements chain to each other starting fresh at the first branch statement. Inside a `foreach` body, same rule. `debug()` statements are stripped at compile time and don't participate at all.
+This rule applies recursively inside control flow. Inside an `if` body, statements chain to each other starting fresh at the first branch statement. Inside a `foreach`, `switch` case, `until`, or `scope` body, same rule. `debug()` statements are stripped at compile time and don't participate at all. `on` handlers are the one intentional break from the source-order rule: their `runAfter` points at their target scope with the chosen status, and statements following a handler chain back to the last real action before any handlers, not to the handler itself.
 
 The practical consequence: you write pax the way you'd write any imperative code, and the dependency graph comes out correct. You never touch `runAfter` directly unless you're using a `raw` block with unusual dependency needs.
 
@@ -348,4 +428,4 @@ Running a flow through paxr first is a fast sanity check before making the round
 
 ## More examples
 
-The `examples/slice*.pax` files each focus on a single feature and are useful when you want a minimal example of one thing. `examples/tour.pax` is a broader walkthrough of the original v1.1 surface, including variables, foreach, if/else, function calls, member access, string concat, and the raw escape hatch. Features added since v1.1 (the `debug()` statement, the Schedule trigger, `terminate`, and the expanded paxr function library) appear in their dedicated slice examples rather than in the tour.
+The `examples/slice*.pax` files each focus on a single feature and are useful when you want a minimal example of one thing. `examples/tour.pax` is a broader walkthrough of the original v1.1 surface, including variables, foreach, if/else, function calls, member access, string concat, and the raw escape hatch. Features added since v1.1 (the `debug()` statement, the Schedule trigger, `terminate`, the expanded paxr function library, and the control-flow sweep additions of `switch`, `scope`, `until`, and `on` handlers) appear in their dedicated slice examples rather than in the tour.
