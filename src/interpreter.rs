@@ -19,6 +19,7 @@ use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram};
 use serde_json::{Map, Value as JsonValue, json};
 use std::collections::HashMap;
 use std::fmt;
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -704,6 +705,13 @@ fn eval_call(name: &str, args: Vec<Value>) -> (Value, bool) {
         "range" => range_int(&args),
 
         // --- boolean / comparison ---
+        "coalesce" => {
+            // PA: return the first non-null argument; null if all are null.
+            args.iter()
+                .find(|v| !matches!(v, Value::Null))
+                .cloned()
+                .unwrap_or(Value::Null)
+        }
         "equals" if args.len() == 2 => Value::Bool(args[0].equals(&args[1])),
         "less" => binary_cmp(&args, |a, b| a < b),
         "lessOrEquals" => binary_cmp(&args, |a, b| a <= b),
@@ -762,6 +770,37 @@ fn eval_call(name: &str, args: Vec<Value>) -> (Value, bool) {
             }
             _ => Value::Null,
         },
+        "uriComponent" if args.len() == 1 => match &args[0] {
+            Value::Str(s) => Value::Str(uri_component_encode(s)),
+            _ => Value::Null,
+        },
+        "uriComponentToString" if args.len() == 1 => match &args[0] {
+            Value::Str(s) => uri_component_decode(s)
+                .map(Value::Str)
+                .unwrap_or(Value::Null),
+            _ => Value::Null,
+        },
+
+        // --- conversion / identity ---
+        "string" if args.len() == 1 => Value::Str(args[0].coerce_str()),
+        "int" if args.len() == 1 => match &args[0] {
+            Value::Int(n) => Value::Int(*n),
+            Value::Str(s) => s.trim().parse::<i64>().map(Value::Int).unwrap_or(Value::Null),
+            Value::Bool(b) => Value::Int(if *b { 1 } else { 0 }),
+            _ => Value::Null,
+        },
+        "bool" if args.len() == 1 => match &args[0] {
+            Value::Bool(b) => Value::Bool(*b),
+            Value::Int(n) => Value::Bool(*n != 0),
+            Value::Str(s) => match s.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" => Value::Bool(true),
+                "false" | "0" => Value::Bool(false),
+                _ => Value::Null,
+            },
+            _ => Value::Null,
+        },
+        "guid" if args.is_empty() => Value::Str(Uuid::new_v4().to_string()),
+        "createArray" => Value::Array(args),
 
         // --- polymorphic (string + array + object) ---
         "length" if args.len() == 1 => length_of(&args[0]),
@@ -929,6 +968,49 @@ fn range_int(args: &[Value]) -> Value {
         return Value::Array((0..count).map(|i| Value::Int(start + i)).collect());
     }
     Value::Null
+}
+
+/// RFC 3986 percent-encoding for PA's `uriComponent`. Unreserved chars
+/// (ALPHA / DIGIT / `-` / `_` / `.` / `~`) pass through; everything else
+/// including multi-byte UTF-8 gets `%XX` per byte. Matches the JavaScript
+/// `encodeURIComponent` behavior PA uses under the hood.
+fn uri_component_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// Inverse of `uri_component_encode`. Returns None if the input contains a
+/// malformed escape or decodes to invalid UTF-8.
+fn uri_component_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+            let v = u8::from_str_radix(hex, 16).ok()?;
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 fn binary_int<F: Fn(i64, i64) -> i64>(args: &[Value], f: F) -> Value {
@@ -1281,5 +1363,88 @@ mod tests {
         // Regression: not all PA functions are implemented. Unknown names
         // must continue to return Null and flag the `unknown` branch.
         run(r#"let x = formatDateTime(utcNow(), "yyyy-MM-dd")"#).unwrap();
+    }
+
+    #[test]
+    fn fn_coalesce_returns_first_non_null() {
+        assert!(matches!(eval_let(r#"let x = coalesce(null, null, "hi")"#, "x"), Value::Str(s) if s == "hi"));
+        assert!(matches!(eval_let("let x = coalesce(null, 42, null)", "x"), Value::Int(42)));
+        // All-null → null.
+        assert!(matches!(eval_let("let x = coalesce(null, null)", "x"), Value::Null));
+    }
+
+    #[test]
+    fn fn_create_array_wraps_args() {
+        match eval_let(r#"let x = createArray("a", "b", 3)"#, "x") {
+            Value::Array(items) => {
+                assert_eq!(items.len(), 3);
+                assert!(matches!(&items[0], Value::Str(s) if s == "a"));
+                assert!(matches!(&items[2], Value::Int(3)));
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn fn_string_coerces_any_value() {
+        assert!(matches!(eval_let("let x = string(42)", "x"), Value::Str(s) if s == "42"));
+        assert!(matches!(eval_let("let x = string(true)", "x"), Value::Str(s) if s == "true"));
+        // Idempotent on strings.
+        assert!(matches!(eval_let(r#"let x = string("hi")"#, "x"), Value::Str(s) if s == "hi"));
+    }
+
+    #[test]
+    fn fn_int_parses_or_passes_through() {
+        assert!(matches!(eval_let(r#"let x = int("123")"#, "x"), Value::Int(123)));
+        // Whitespace trimmed.
+        assert!(matches!(eval_let(r#"let x = int("  42  ")"#, "x"), Value::Int(42)));
+        // Unparseable → Null (not error).
+        assert!(matches!(eval_let(r#"let x = int("nope")"#, "x"), Value::Null));
+        // Int passthrough.
+        assert!(matches!(eval_let("let x = int(7)", "x"), Value::Int(7)));
+    }
+
+    #[test]
+    fn fn_bool_parses_or_passes_through() {
+        assert!(matches!(eval_let(r#"let x = bool("true")"#, "x"), Value::Bool(true)));
+        assert!(matches!(eval_let(r#"let x = bool("FALSE")"#, "x"), Value::Bool(false)));
+        assert!(matches!(eval_let(r#"let x = bool("1")"#, "x"), Value::Bool(true)));
+        assert!(matches!(eval_let("let x = bool(0)", "x"), Value::Bool(false)));
+        // Bogus → Null.
+        assert!(matches!(eval_let(r#"let x = bool("maybe")"#, "x"), Value::Null));
+    }
+
+    #[test]
+    fn fn_guid_produces_rfc4122_string() {
+        // Non-deterministic by design. Assert only the shape (36 chars with
+        // hyphens in the right places) rather than a specific value.
+        match eval_let("let x = guid()", "x") {
+            Value::Str(s) => {
+                assert_eq!(s.len(), 36, "guid string should be 36 chars, got {s:?}");
+                let parts: Vec<&str> = s.split('-').collect();
+                assert_eq!(parts.len(), 5);
+                assert_eq!(parts[0].len(), 8);
+                assert_eq!(parts[4].len(), 12);
+            }
+            _ => panic!("expected string"),
+        }
+    }
+
+    #[test]
+    fn fn_uri_component_encode_and_decode() {
+        // Spaces and slashes get percent-encoded; unreserved chars pass through.
+        assert!(matches!(
+            eval_let(r#"let x = uriComponent("hello world / pax")"#, "x"),
+            Value::Str(s) if s == "hello%20world%20%2F%20pax"
+        ));
+        // Round-trip.
+        assert!(matches!(
+            eval_let(
+                r#"let enc = uriComponent("a b&c=d")
+let dec = uriComponentToString(enc)"#,
+                "dec"
+            ),
+            Value::Str(s) if s == "a b&c=d"
+        ));
     }
 }

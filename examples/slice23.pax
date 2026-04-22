@@ -49,4 +49,14 @@ let smallest = min(9, 3, 7)
 let largest = max(scores)       // single-array form: max([87, 42, 99, 61]) = 99
 let zero_to_four = range(0, 5)
 
+// Tier 1: coalesce, createArray, conversion, URL, guid
+let fallback = coalesce(null, null, "default value")
+let built = createArray("alpha", "beta", 3)
+let as_int = int("  42  ")      // whitespace trimmed, returns 42
+let as_bool = bool("TRUE")      // case-insensitive, returns true
+let as_str = string(42)         // coerces int to "42"
+let encoded = uriComponent("a b & c")
+let decoded = uriComponentToString(encoded)
+let id = guid()                 // non-deterministic in paxr
+
 debug(shout, item_count, has_banana, smallest, largest)

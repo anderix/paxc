@@ -130,10 +130,13 @@ fn is_known_function(name: &str) -> bool {
         // paxr polymorphic + array library
         | "length" | "empty" | "contains"
         | "first" | "last" | "skip" | "take" | "join"
+        // paxr conversion + utility
+        | "string" | "int" | "bool" | "guid"
+        | "coalesce" | "createArray"
+        | "uriComponent" | "uriComponentToString"
         // common PA expression functions users reach for without (...)
         | "body" | "items" | "outputs" | "variables" | "parameters"
         | "triggerBody" | "triggerOutputs"
-        | "coalesce" | "createArray"
         | "utcNow" | "formatDateTime"
     )
 }
@@ -231,12 +234,22 @@ mod tests {
     }
 
     #[test]
-    fn function_hint_skips_type_keywords() {
-        // Pax types are not PA functions; the hint would be misleading.
-        for type_name in ["int", "string", "bool", "array", "object"] {
+    fn function_hint_skips_non_function_type_keywords() {
+        // `array` and `object` are pax types with no corresponding PA
+        // expression function, so hinting "did you mean array(...)?" would
+        // mislead. `int`, `string`, and `bool` ARE real PA functions (added
+        // as paxr-evaluated functions alongside parsing / conversion),
+        // so the hint is useful for them.
+        for type_name in ["array", "object"] {
             assert!(
                 !is_known_function(type_name),
-                "type keyword `{type_name}` must not trigger function hint"
+                "non-function type keyword `{type_name}` must not trigger function hint"
+            );
+        }
+        for fn_name in ["int", "string", "bool"] {
+            assert!(
+                is_known_function(fn_name),
+                "function-shaped type keyword `{fn_name}` should trigger the hint"
             );
         }
     }

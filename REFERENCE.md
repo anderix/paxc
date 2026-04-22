@@ -216,12 +216,22 @@ paxc emits every function call unchanged, but paxr implements a subset of Power 
 | Category | Functions |
 |---|---|
 | Arithmetic | `add`, `sub`, `mul`, `div`, `mod`, `min`, `max`, `range` |
-| Comparison and logic | `equals`, `less`, `lessOrEquals`, `greater`, `greaterOrEquals`, `and`, `or`, `not` |
-| Text | `concat`, `toUpper`, `toLower`, `trim`, `substring`, `indexOf`, `lastIndexOf`, `startsWith`, `endsWith`, `replace`, `split` |
+| Comparison and logic | `equals`, `less`, `lessOrEquals`, `greater`, `greaterOrEquals`, `and`, `or`, `not`, `coalesce` |
+| Text | `concat`, `toUpper`, `toLower`, `trim`, `substring`, `indexOf`, `lastIndexOf`, `startsWith`, `endsWith`, `replace`, `split`, `uriComponent`, `uriComponentToString` |
 | Polymorphic | `length`, `empty`, `contains` |
-| Array | `first`, `last`, `skip`, `take`, `join` |
+| Array | `first`, `last`, `skip`, `take`, `join`, `createArray` |
+| Conversion and utility | `string`, `int`, `bool`, `guid` |
 
-`length`, `empty`, and `contains` accept strings, arrays, and objects. Power Automate's `startsWith`, `endsWith`, `indexOf`, and `lastIndexOf` are case-insensitive; paxr follows the same convention. String `contains` is case-sensitive. Array `contains` is a membership test; object `contains` checks for a key. `min` and `max` accept either variadic integer arguments or a single array.
+A few semantics worth knowing:
+
+- `length`, `empty`, and `contains` accept strings, arrays, and objects.
+- Power Automate's `startsWith`, `endsWith`, `indexOf`, and `lastIndexOf` are case-insensitive; paxr follows the same convention.
+- String `contains` is case-sensitive. Array `contains` is a membership test. Object `contains` checks for a key.
+- `min` and `max` accept either variadic integer arguments or a single array.
+- `coalesce` returns the first argument that is not `null`. An empty string or zero is not null and will be returned.
+- `int("  42  ")` trims whitespace before parsing. Unparseable input returns `null` rather than erroring.
+- `bool` accepts `"true"` / `"false"` (case-insensitive), `"1"` / `"0"`, and the integer `0` / `1`.
+- `guid()` produces a fresh random UUID each call, so paxr runs that use it are not bit-for-bit reproducible. This matches Power Automate's runtime behavior.
 
 Date and time functions (`utcNow`, `formatDateTime`, `addMinutes`, and the rest) are not yet implemented in paxr and currently render as null under the interpreter. They continue to work correctly in Power Automate.
 
@@ -338,4 +348,4 @@ Running a flow through paxr first is a fast sanity check before making the round
 
 ## More examples
 
-Every construct above appears in `examples/tour.pax`. The `examples/slice*.pax` files each focus on a single feature, which is useful when you want a minimal example of one thing.
+The `examples/slice*.pax` files each focus on a single feature and are useful when you want a minimal example of one thing. `examples/tour.pax` is a broader walkthrough of the original v1.1 surface, including variables, foreach, if/else, function calls, member access, string concat, and the raw escape hatch. Features added since v1.1 (the `debug()` statement, the Schedule trigger, `terminate`, and the expanded paxr function library) appear in their dedicated slice examples rather than in the tour.
