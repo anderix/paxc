@@ -102,6 +102,41 @@ pub enum Stmt {
         args: Vec<DebugArg>,
         span: Span,
     },
+    /// `terminate <status> [message]` early-exit. `message` is only valid when
+    /// status is `Failed` (parser-enforced). Compiles to PA's `Terminate`
+    /// action; paxr halts execution on reaching it.
+    Terminate {
+        status: TerminateStatus,
+        message: Option<Expr>,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminateStatus {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl TerminateStatus {
+    /// PA's canonical capitalization for the `runStatus` field.
+    pub fn as_pa_str(self) -> &'static str {
+        match self {
+            TerminateStatus::Succeeded => "Succeeded",
+            TerminateStatus::Failed => "Failed",
+            TerminateStatus::Cancelled => "Cancelled",
+        }
+    }
+
+    /// Lowercase label used in paxr trace output.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            TerminateStatus::Succeeded => "succeeded",
+            TerminateStatus::Failed => "failed",
+            TerminateStatus::Cancelled => "cancelled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

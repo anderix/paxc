@@ -11,7 +11,7 @@
 //! variable) or `Expr::ComposeRef` (pointing at a `let` binding's Compose
 //! action key), so the emitter never sees an unresolved reference.
 
-use crate::ast::{AssignOp, DebugArg, Expr, Literal, Program, Stmt, Trigger, Type};
+use crate::ast::{AssignOp, DebugArg, Expr, Literal, Program, Stmt, TerminateStatus, Trigger, Type};
 use crate::lexer::Span;
 use std::collections::HashMap;
 use std::fmt;
@@ -90,6 +90,13 @@ pub enum ActionKind {
     Debug {
         args: Vec<DebugArg>,
         span: Span,
+    },
+    /// `terminate <status> [message]`. Compiles to a PA Terminate action;
+    /// paxr halts execution on reaching one. Message is only present when
+    /// status is Failed (parser-enforced).
+    Terminate {
+        status: TerminateStatus,
+        message: Option<Expr>,
     },
 }
 
@@ -353,6 +360,21 @@ fn resolve_statements(
                     ActionKind::Debug {
                         args: resolved_args,
                         span: *span,
+                    },
+                    *span,
+                )
+            }
+            Stmt::Terminate { status, message, span } => {
+                let resolved_message = match message {
+                    Some(m) => Some(resolve_expr(m, env)?),
+                    None => None,
+                };
+                let action_name = unique_name("Terminate", name_counts);
+                (
+                    action_name,
+                    ActionKind::Terminate {
+                        status: *status,
+                        message: resolved_message,
                     },
                     *span,
                 )

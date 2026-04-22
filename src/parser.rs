@@ -4,7 +4,8 @@
 //! declarations and builds a `Program` AST.
 
 use crate::ast::{
-    AssignOp, BinOp, DebugArg, Expr, Frequency, Literal, Program, Stmt, Trigger, Type, UnaryOp,
+    AssignOp, BinOp, DebugArg, Expr, Frequency, Literal, Program, Stmt, TerminateStatus, Trigger,
+    Type, UnaryOp,
 };
 use crate::lexer::{Span, Token};
 use chumsky::{input::ValueInput, prelude::*};
@@ -320,12 +321,38 @@ where
             )
             .map_with(|args, e| Stmt::Debug { args, span: e.span() });
 
+        // `terminate <status> [message]`. Status is one of succeeded / failed /
+        // cancelled. Only `failed` accepts a trailing message expression; the
+        // other statuses never consume one, so a plain `terminate succeeded`
+        // followed by a new statement on the next line parses cleanly without
+        // the expr parser greedily eating the next identifier.
+        let failed_form = select! { Token::Ident("failed") => () }
+            .ignore_then(expr.clone().or_not())
+            .map(|msg| (TerminateStatus::Failed, msg));
+        let succeeded_form = select! { Token::Ident("succeeded") => () }
+            .map(|_| (TerminateStatus::Succeeded, None));
+        let cancelled_form = select! { Token::Ident("cancelled") => () }
+            .map(|_| (TerminateStatus::Cancelled, None));
+        let terminate_body = failed_form
+            .or(succeeded_form)
+            .or(cancelled_form)
+            .labelled("terminate status (succeeded, failed, or cancelled)");
+
+        let terminate_stmt = just(Token::Terminate)
+            .ignore_then(terminate_body)
+            .map_with(|(status, message), e| Stmt::Terminate {
+                status,
+                message,
+                span: e.span(),
+            });
+
         var_decl
             .or(let_decl)
             .or(if_stmt)
             .or(foreach_stmt)
             .or(raw_stmt)
             .or(debug_stmt)
+            .or(terminate_stmt)
             .or(assign)
     });
 
@@ -601,5 +628,88 @@ mod tests {
         let prog = parse_full("trigger manual\nvar x: int = 1");
         assert_eq!(prog.trigger, Trigger::Manual);
         assert_eq!(prog.statements.len(), 1);
+    }
+
+    #[test]
+    fn slice22_terminate_succeeded_no_message() {
+        let prog = parse("terminate succeeded");
+        assert!(matches!(
+            &prog.statements[0],
+            Stmt::Terminate {
+                status: TerminateStatus::Succeeded,
+                message: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn slice22_terminate_failed_with_string_message() {
+        let prog = parse(r#"terminate failed "queue empty""#);
+        match &prog.statements[0] {
+            Stmt::Terminate {
+                status: TerminateStatus::Failed,
+                message: Some(Expr::Literal(Literal::String(s))),
+                ..
+            } => assert_eq!(s, "queue empty"),
+            other => panic!("expected terminate failed with string message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slice22_terminate_failed_with_expression_message() {
+        // Message is a full Expr, so `&` concat and var refs must work.
+        let prog = parse("var n: int = 0\nterminate failed \"at \" & n");
+        assert!(matches!(
+            &prog.statements[1],
+            Stmt::Terminate {
+                status: TerminateStatus::Failed,
+                message: Some(Expr::BinaryOp { .. }),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn slice22_terminate_cancelled_parses() {
+        let prog = parse("terminate cancelled");
+        assert!(matches!(
+            &prog.statements[0],
+            Stmt::Terminate {
+                status: TerminateStatus::Cancelled,
+                message: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn slice22_terminate_message_on_succeeded_is_parse_error() {
+        let src = "trigger manual\nterminate succeeded \"nope\"";
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        let result = parser().parse(
+            tokens
+                .as_slice()
+                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+        );
+        assert!(
+            result.has_errors(),
+            "expected parse error: message only valid with failed"
+        );
+    }
+
+    #[test]
+    fn slice22_terminate_unknown_status_is_parse_error() {
+        let src = "trigger manual\nterminate bogus";
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        let result = parser().parse(
+            tokens
+                .as_slice()
+                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+        );
+        assert!(
+            result.has_errors(),
+            "expected parse error: unknown status keyword"
+        );
     }
 }

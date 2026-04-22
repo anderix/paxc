@@ -1,0 +1,26 @@
+// Slice 22: terminate.
+//
+// `terminate <status> [message]` early-exits the flow. Status is one of
+// succeeded / failed / cancelled; message is only valid with `failed`.
+// paxc emits a PA Terminate action (type "Terminate"); paxr halts
+// execution and prints a one-line notice.
+
+trigger manual
+
+var queue_size: int = 0
+var processed: int = 0
+
+if queue_size == 0 {
+  terminate succeeded
+}
+
+// Anything below here is unreachable when queue_size == 0.
+var items: array = ["a", "b", "c"]
+foreach item in items {
+  processed += 1
+  if processed > queue_size {
+    terminate failed "processed more items than expected: " & processed
+  }
+}
+
+debug(processed)

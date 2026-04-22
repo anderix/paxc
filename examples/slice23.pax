@@ -1,0 +1,52 @@
+// Slice 23: paxr function library.
+//
+// paxc has always passed function calls through unchanged, so any PA
+// expression function works at compile and run time in PA. paxr used to
+// print `<skipping unknown "name">` for everything outside the small
+// arithmetic / boolean set. This slice adds text, number, and array
+// functions so `paxr` can actually evaluate common pax programs locally
+// instead of returning Null.
+//
+// Functions added: toUpper, toLower, trim, length, substring, indexOf,
+// lastIndexOf, startsWith, endsWith, replace, split, join, contains,
+// empty, first, last, skip, take, mod, min, max, range.
+//
+// length/empty/contains are polymorphic across strings, arrays, and objects.
+// indexOf/lastIndexOf/startsWith/endsWith are case-insensitive (PA quirk).
+// String contains is case-sensitive.
+
+trigger manual
+
+// Text
+let greeting = trim("  hello world  ")
+let shout = toUpper(greeting)
+let whisper = toLower(greeting)
+let prefix_ok = startsWith(greeting, "HELLO")   // true (case-insensitive)
+let where_world = indexOf(greeting, "WORLD")    // 6
+let first_five = substring(greeting, 0, 5)
+let replaced = replace(greeting, "world", "pax")
+
+// Split + join round-trip
+let parts = split("a,b,c", ",")
+let rejoined = join(parts, " / ")
+
+// Polymorphic length / empty / contains
+var items: array = ["apple", "banana", "cherry"]
+let item_count = length(items)
+let nothing_here = empty(items)
+let has_banana = contains(items, "banana")
+
+// Array helpers
+let top = first(items)
+let tail = last(items)
+let without_first = skip(items, 1)
+let first_two = take(items, 2)
+
+// Numbers
+var scores: array = [87, 42, 99, 61]
+let remainder = mod(17, 5)
+let smallest = min(9, 3, 7)
+let largest = max(scores)       // single-array form: max([87, 42, 99, 61]) = 99
+let zero_to_four = range(0, 5)
+
+debug(shout, item_count, has_banana, smallest, largest)

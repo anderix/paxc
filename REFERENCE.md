@@ -179,6 +179,20 @@ foreach task in tasks {
 
 `foreach` compiles to a Power Automate `Apply_to_each` action. The iterator name (`task` above) is available by dot-access inside the body. Mutations inside the body operate on enclosing-scope variables, which PA runs serially by default.
 
+### terminate
+
+```
+terminate succeeded
+terminate failed
+terminate failed "queue is empty"
+terminate failed "validation failed at step " & step_name
+terminate cancelled
+```
+
+`terminate` early-exits the flow. The syntax is `terminate <status> [message]`. Status is one of `succeeded`, `failed`, or `cancelled`. A message is only accepted after `failed`, because Power Automate's `runError` field is ignored on the other statuses. The message is any expression that evaluates to a string, so `&` concat and variable references both work.
+
+Compiles to a Power Automate `Terminate` action with `runStatus` set and, for the failed form, a `runError.message` field. paxr halts execution on reaching a `terminate`: subsequent statements do not run, including those enclosed by `foreach` or `if` at higher scopes. The end-of-run state dump still prints and reflects what was set up to the point of termination.
+
 ## Function calls
 
 ```
@@ -194,6 +208,22 @@ if empty(items) {
 Function calls pass through to Power Automate's expression language. paxc doesn't distinguish between "built-in" and "unknown" function names: `concat`, `length`, `toUpper`, `empty`, `substring`, `first`, `last`, and anything else Power Automate supports all work the same way. The call is emitted as-is inside the expression string.
 
 This means the catalog of available functions is Power Automate's own expression function reference. Any function name valid there is valid in pax. Nested calls are fine. When a function call appears as an `if` condition, paxc can't prove its return type is boolean, so it auto-wraps with `equals(..., true)`.
+
+### Functions paxr can evaluate locally
+
+paxc emits every function call unchanged, but paxr implements a subset of Power Automate's expression functions so the interpreter can produce real values for local testing instead of returning null. A function not in the list below still compiles and runs correctly in Power Automate; paxr just returns null and prints a `<skipping unknown "name">` notice so you know the value didn't come from a real evaluation.
+
+| Category | Functions |
+|---|---|
+| Arithmetic | `add`, `sub`, `mul`, `div`, `mod`, `min`, `max`, `range` |
+| Comparison and logic | `equals`, `less`, `lessOrEquals`, `greater`, `greaterOrEquals`, `and`, `or`, `not` |
+| Text | `concat`, `toUpper`, `toLower`, `trim`, `substring`, `indexOf`, `lastIndexOf`, `startsWith`, `endsWith`, `replace`, `split` |
+| Polymorphic | `length`, `empty`, `contains` |
+| Array | `first`, `last`, `skip`, `take`, `join` |
+
+`length`, `empty`, and `contains` accept strings, arrays, and objects. Power Automate's `startsWith`, `endsWith`, `indexOf`, and `lastIndexOf` are case-insensitive; paxr follows the same convention. String `contains` is case-sensitive. Array `contains` is a membership test; object `contains` checks for a key. `min` and `max` accept either variadic integer arguments or a single array.
+
+Date and time functions (`utcNow`, `formatDateTime`, `addMinutes`, and the rest) are not yet implemented in paxr and currently render as null under the interpreter. They continue to work correctly in Power Automate.
 
 ## The raw escape hatch
 

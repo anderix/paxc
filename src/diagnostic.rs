@@ -117,19 +117,23 @@ pub fn from_resolve_error(err: &crate::resolver::ResolveError) -> Diagnostic {
 fn is_known_function(name: &str) -> bool {
     matches!(
         name,
-        // paxr's compiler-synthesized library
-        "add" | "sub" | "mul" | "div"
+        // paxr's compiler-synthesized library (arithmetic/logic)
+        "add" | "sub" | "mul" | "div" | "mod"
+        | "min" | "max" | "range"
         | "concat" | "equals"
         | "less" | "lessOrEquals" | "greater" | "greaterOrEquals"
         | "not" | "and" | "or"
+        // paxr text library
+        | "toLower" | "toUpper" | "trim" | "substring"
+        | "indexOf" | "lastIndexOf" | "startsWith" | "endsWith"
+        | "replace" | "split"
+        // paxr polymorphic + array library
+        | "length" | "empty" | "contains"
+        | "first" | "last" | "skip" | "take" | "join"
         // common PA expression functions users reach for without (...)
-        | "length" | "empty" | "first" | "last"
         | "body" | "items" | "outputs" | "variables" | "parameters"
         | "triggerBody" | "triggerOutputs"
-        | "coalesce" | "createArray" | "join"
-        | "contains" | "startsWith" | "endsWith"
-        | "indexOf" | "lastIndexOf" | "substring" | "replace"
-        | "toLower" | "toUpper" | "trim" | "split"
+        | "coalesce" | "createArray"
         | "utcNow" | "formatDateTime"
     )
 }

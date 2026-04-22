@@ -5,7 +5,7 @@
 //! an `actions` map. Action keys and `runAfter` predecessors come from the
 //! resolver, so this layer is purely a tree-to-JSON translation.
 
-use crate::ast::{BinOp, Expr, Frequency, Literal, Trigger, Type, UnaryOp};
+use crate::ast::{BinOp, Expr, Frequency, Literal, TerminateStatus, Trigger, Type, UnaryOp};
 use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram};
 use serde_json::{Map, Value, json};
 
@@ -119,8 +119,27 @@ fn emit_action(action: &ResolvedAction) -> Value {
             // Filtered out in `build_actions_map` before reaching here.
             unreachable!("debug action reached emitter");
         }
+        ActionKind::Terminate { status, message } => emit_terminate(*status, message.as_ref()),
     };
     splice_run_after(body, &action.run_after)
+}
+
+fn emit_terminate(status: TerminateStatus, message: Option<&Expr>) -> Value {
+    let mut inputs = Map::new();
+    inputs.insert(
+        "runStatus".to_string(),
+        Value::String(status.as_pa_str().to_string()),
+    );
+    if let Some(msg) = message {
+        // `expr_to_json` emits literal strings as plain JSON and expressions
+        // as the `@{...}` interpolation form -- both valid for PA's
+        // `runError.message` field.
+        inputs.insert("runError".to_string(), json!({ "message": expr_to_json(msg) }));
+    }
+    json!({
+        "type": "Terminate",
+        "inputs": Value::Object(inputs),
+    })
 }
 
 fn emit_foreach(collection: &Expr, body: &[ResolvedAction]) -> Value {
@@ -703,5 +722,45 @@ msg &= "!""#,
         let trig = &out["definition"]["triggers"]["manual"];
         assert_eq!(trig["type"], "Request");
         assert_eq!(trig["kind"], "Button");
+    }
+
+    #[test]
+    fn slice22_terminate_succeeded_emits_minimal_inputs() {
+        let out = compile("terminate succeeded");
+        let action = &out["definition"]["actions"]["Terminate"];
+        assert_eq!(action["type"], "Terminate");
+        assert_eq!(action["inputs"]["runStatus"], "Succeeded");
+        // No runError on succeeded.
+        assert!(action["inputs"].get("runError").is_none());
+    }
+
+    #[test]
+    fn slice22_terminate_failed_with_literal_message() {
+        let out = compile(r#"terminate failed "validation failed""#);
+        let action = &out["definition"]["actions"]["Terminate"];
+        assert_eq!(action["inputs"]["runStatus"], "Failed");
+        assert_eq!(
+            action["inputs"]["runError"]["message"],
+            "validation failed"
+        );
+    }
+
+    #[test]
+    fn slice22_terminate_failed_with_expression_message() {
+        // Message expression should be emitted as a PA expression string.
+        let out = compile("var step: string = \"validate\"\nterminate failed \"failed at \" & step");
+        let action = &out["definition"]["actions"]["Terminate"];
+        let msg = action["inputs"]["runError"]["message"].as_str().unwrap();
+        assert!(msg.starts_with("@"), "expected PA expression wrapping, got {msg}");
+        assert!(msg.contains("concat"));
+        assert!(msg.contains("failed at"));
+    }
+
+    #[test]
+    fn slice22_terminate_cancelled_emits_cancelled_status() {
+        let out = compile("terminate cancelled");
+        let action = &out["definition"]["actions"]["Terminate"];
+        assert_eq!(action["inputs"]["runStatus"], "Cancelled");
+        assert!(action["inputs"].get("runError").is_none());
     }
 }
