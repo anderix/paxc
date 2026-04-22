@@ -429,6 +429,42 @@ impl<'src> Interpreter<'src> {
             ActionKind::Debug { args, span } => {
                 self.emit_debug(args, *span)?;
             }
+            ActionKind::Switch {
+                subject,
+                subject_span,
+                cases,
+                default,
+            } => {
+                let subject_val = self.eval(subject)?;
+                let source = source_slice(self.src, *subject_span);
+                let matched = cases.iter().find(|c| {
+                    let case_val = literal_to_value(&c.value);
+                    subject_val.equals(&case_val)
+                });
+                let (body, label): (&[ResolvedAction], String) = match matched {
+                    Some(c) => (
+                        c.body.as_slice(),
+                        format!("case {}", literal_to_value(&c.value).display_compact()),
+                    ),
+                    None => match default {
+                        Some(body) => (body.as_slice(), "default".to_string()),
+                        None => {
+                            self.trace(&format!(
+                                "switch ({source} = {}) -> no match",
+                                subject_val.display_compact()
+                            ));
+                            return Ok(());
+                        }
+                    },
+                };
+                self.trace(&format!(
+                    "switch ({source} = {}) -> {label}",
+                    subject_val.display_compact()
+                ));
+                self.indent += 1;
+                self.run_actions(body, false)?;
+                self.indent -= 1;
+            }
             ActionKind::Terminate { status, message } => {
                 let rendered = match message {
                     Some(m) => Some(self.eval(m)?.coerce_str()),
@@ -1428,6 +1464,87 @@ mod tests {
             }
             _ => panic!("expected string"),
         }
+    }
+
+    #[test]
+    fn slice27_switch_runs_matching_case() {
+        let state = run(
+            r#"var status: string = "active"
+var tag: string = ""
+switch status {
+  case "active" {
+    tag = "ACTIVE"
+  }
+  case "pending" {
+    tag = "PENDING"
+  }
+  default {
+    tag = "OTHER"
+  }
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            state.vars.get("tag"),
+            Some(Value::Str(s)) if s == "ACTIVE"
+        ));
+    }
+
+    #[test]
+    fn slice27_switch_falls_through_to_default() {
+        let state = run(
+            r#"var status: string = "archived"
+var tag: string = ""
+switch status {
+  case "active" {
+    tag = "A"
+  }
+  default {
+    tag = "D"
+  }
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            state.vars.get("tag"),
+            Some(Value::Str(s)) if s == "D"
+        ));
+    }
+
+    #[test]
+    fn slice27_switch_no_match_no_default_is_noop() {
+        let state = run(
+            r#"var n: int = 99
+var tag: string = "untouched"
+switch n {
+  case 1 {
+    tag = "changed"
+  }
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            state.vars.get("tag"),
+            Some(Value::Str(s)) if s == "untouched"
+        ));
+    }
+
+    #[test]
+    fn slice27_switch_int_cases_match_by_value() {
+        let state = run(
+            r#"var code: int = 2
+var tag: string = ""
+switch code {
+  case 1 { tag = "one" }
+  case 2 { tag = "two" }
+  case 3 { tag = "three" }
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            state.vars.get("tag"),
+            Some(Value::Str(s)) if s == "two"
+        ));
     }
 
     #[test]

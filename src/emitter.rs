@@ -6,7 +6,7 @@
 //! resolver, so this layer is purely a tree-to-JSON translation.
 
 use crate::ast::{BinOp, Expr, Frequency, Literal, TerminateStatus, Trigger, Type, UnaryOp};
-use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram};
+use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram, ResolvedSwitchCase};
 use serde_json::{Map, Value, json};
 
 const SCHEMA_URL: &str =
@@ -53,6 +53,14 @@ pub fn count_debug_actions(actions: &[ResolvedAction]) -> usize {
             }
             ActionKind::Foreach { body, .. } => {
                 n += count_debug_actions(body);
+            }
+            ActionKind::Switch { cases, default, .. } => {
+                for case in cases {
+                    n += count_debug_actions(&case.body);
+                }
+                if let Some(default) = default {
+                    n += count_debug_actions(default);
+                }
             }
             _ => {}
         }
@@ -120,8 +128,49 @@ fn emit_action(action: &ResolvedAction) -> Value {
             unreachable!("debug action reached emitter");
         }
         ActionKind::Terminate { status, message } => emit_terminate(*status, message.as_ref()),
+        ActionKind::Switch {
+            subject,
+            cases,
+            default,
+            ..
+        } => emit_switch(subject, cases, default.as_deref()),
     };
     splice_run_after(body, &action.run_after)
+}
+
+fn emit_switch(
+    subject: &Expr,
+    cases: &[ResolvedSwitchCase],
+    default: Option<&[ResolvedAction]>,
+) -> Value {
+    let mut cases_map = Map::new();
+    for case in cases {
+        cases_map.insert(
+            case.action_name.clone(),
+            json!({
+                "case": literal_to_json(&case.value),
+                "actions": build_actions_map(&case.body),
+            }),
+        );
+    }
+    // PA accepts a Switch without a default arm -- the whole `default` key can
+    // be omitted. paxc emits `default: { actions: {} }` only when the source
+    // wrote a `default` block, even if the block is empty, so round-tripping
+    // the source's intent is preserved.
+    let mut out = Map::new();
+    out.insert("type".to_string(), json!("Switch"));
+    out.insert(
+        "expression".to_string(),
+        json!(expr_to_pa_field(subject)),
+    );
+    out.insert("cases".to_string(), Value::Object(cases_map));
+    if let Some(default_actions) = default {
+        out.insert(
+            "default".to_string(),
+            json!({ "actions": build_actions_map(default_actions) }),
+        );
+    }
+    Value::Object(out)
 }
 
 fn emit_terminate(status: TerminateStatus, message: Option<&Expr>) -> Value {
@@ -754,6 +803,94 @@ msg &= "!""#,
         assert!(msg.starts_with("@"), "expected PA expression wrapping, got {msg}");
         assert!(msg.contains("concat"));
         assert!(msg.contains("failed at"));
+    }
+
+    #[test]
+    fn slice27_switch_emits_pa_switch_action() {
+        let out = compile(
+            r#"var status: string = "active"
+switch status {
+  case "active" {
+  }
+  case "pending" {
+  }
+  default {
+  }
+}"#,
+        );
+        let sw = &out["definition"]["actions"]["Switch"];
+        assert_eq!(sw["type"], "Switch");
+        assert_eq!(
+            sw["expression"].as_str().unwrap(),
+            "@variables('status')"
+        );
+        let cases = sw["cases"].as_object().unwrap();
+        assert!(cases.contains_key("Case"), "first case uses bare Case key");
+        assert!(cases.contains_key("Case_1"), "second case uses Case_1");
+        assert_eq!(cases["Case"]["case"], "active");
+        assert_eq!(cases["Case_1"]["case"], "pending");
+        assert!(
+            sw["default"]["actions"].is_object(),
+            "default block present"
+        );
+    }
+
+    #[test]
+    fn slice27_switch_with_int_case_values() {
+        let out = compile(
+            r#"var code: int = 1
+switch code {
+  case 1 {
+  }
+  case 2 {
+  }
+}"#,
+        );
+        let cases = &out["definition"]["actions"]["Switch"]["cases"];
+        assert_eq!(cases["Case"]["case"], 1);
+        assert_eq!(cases["Case_1"]["case"], 2);
+    }
+
+    #[test]
+    fn slice27_switch_default_omitted_when_absent() {
+        let out = compile(
+            r#"var n: int = 1
+switch n {
+  case 1 {
+  }
+}"#,
+        );
+        let sw = &out["definition"]["actions"]["Switch"];
+        assert!(
+            sw.get("default").is_none(),
+            "no source default -> no key emitted"
+        );
+    }
+
+    #[test]
+    fn slice27_switch_case_actions_nest_correctly() {
+        // The assignments inside each case should appear in that case's
+        // actions map, not at the workflow top level.
+        let out = compile(
+            r#"var n: int = 0
+var tag: string = ""
+switch n {
+  case 1 {
+    tag = "one"
+  }
+  case 2 {
+    tag = "two"
+  }
+}"#,
+        );
+        let actions = out["definition"]["actions"].as_object().unwrap();
+        // The only top-level actions are the two inits and the Switch itself.
+        assert!(actions.contains_key("Initialize_n"));
+        assert!(actions.contains_key("Initialize_tag"));
+        assert!(actions.contains_key("Switch"));
+        assert!(!actions.contains_key("Set_tag"), "case body action leaked to top level");
+        let case1 = &actions["Switch"]["cases"]["Case"]["actions"];
+        assert!(case1.as_object().unwrap().contains_key("Set_tag"));
     }
 
     #[test]

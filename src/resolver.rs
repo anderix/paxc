@@ -11,7 +11,9 @@
 //! variable) or `Expr::ComposeRef` (pointing at a `let` binding's Compose
 //! action key), so the emitter never sees an unresolved reference.
 
-use crate::ast::{AssignOp, DebugArg, Expr, Literal, Program, Stmt, TerminateStatus, Trigger, Type};
+use crate::ast::{
+    AssignOp, DebugArg, Expr, Literal, Program, Stmt, TerminateStatus, Trigger, Type,
+};
 use crate::lexer::Span;
 use std::collections::HashMap;
 use std::fmt;
@@ -98,6 +100,27 @@ pub enum ActionKind {
         status: TerminateStatus,
         message: Option<Expr>,
     },
+    /// `switch subject { case L { ... } ... default { ... } }`. Each case
+    /// has a literal value and a resolved body; `default` is `None` when the
+    /// source omitted the default arm.
+    Switch {
+        subject: Expr,
+        /// Source span of the subject expression, threaded through for paxr's
+        /// verbose trace (parallel to Condition's `condition_span`).
+        subject_span: Span,
+        cases: Vec<ResolvedSwitchCase>,
+        default: Option<Vec<ResolvedAction>>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedSwitchCase {
+    /// PA action key for this case (e.g. `Case`, `Case_1`). Lives inside the
+    /// parent Switch's `cases` map; name counts are shared with the top-level
+    /// counter for simplicity, so these are globally unique too.
+    pub action_name: String,
+    pub value: Literal,
+    pub body: Vec<ResolvedAction>,
 }
 
 #[derive(Debug, Clone)]
@@ -360,6 +383,49 @@ fn resolve_statements(
                     ActionKind::Debug {
                         args: resolved_args,
                         span: *span,
+                    },
+                    *span,
+                )
+            }
+            Stmt::Switch {
+                subject,
+                subject_span,
+                cases,
+                default,
+                span,
+            } => {
+                let subject = resolve_expr(subject, env)?;
+                let action_name = unique_name("Switch", name_counts);
+                // Cases and default each scope their `let` bindings to their
+                // own branch, like if/else-branches. Clone the env before
+                // each branch and restore after.
+                let saved_env = env.clone();
+                let mut resolved_cases = Vec::with_capacity(cases.len());
+                for case in cases {
+                    let case_action_name = unique_name("Case", name_counts);
+                    *env = saved_env.clone();
+                    let body = resolve_statements(&case.body, env, name_counts, false)?;
+                    resolved_cases.push(ResolvedSwitchCase {
+                        action_name: case_action_name,
+                        value: case.value.clone(),
+                        body,
+                    });
+                }
+                let resolved_default = match default {
+                    Some(stmts) => {
+                        *env = saved_env.clone();
+                        Some(resolve_statements(stmts, env, name_counts, false)?)
+                    }
+                    None => None,
+                };
+                *env = saved_env;
+                (
+                    action_name,
+                    ActionKind::Switch {
+                        subject,
+                        subject_span: *subject_span,
+                        cases: resolved_cases,
+                        default: resolved_default,
                     },
                     *span,
                 )
@@ -1024,6 +1090,99 @@ mod tests {
             ],
         };
         assert!(resolve(&prog).is_ok());
+    }
+
+    #[test]
+    fn slice27_switch_resolves_with_unique_case_names() {
+        // Multiple cases should get auto-suffixed action names via the shared
+        // name counter, parallel to PA's Case / Case_1 convention.
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var_ty("status", Type::String),
+                Stmt::Switch {
+                    subject: rref("status"),
+                    subject_span: sp(),
+                    cases: vec![
+                        crate::ast::SwitchCase {
+                            value: Literal::String("a".to_string()),
+                            body: vec![],
+                            span: sp(),
+                        },
+                        crate::ast::SwitchCase {
+                            value: Literal::String("b".to_string()),
+                            body: vec![],
+                            span: sp(),
+                        },
+                    ],
+                    default: None,
+                    span: sp(),
+                },
+            ],
+        };
+        let resolved = resolve(&prog).unwrap();
+        match &resolved.actions[1].kind {
+            ActionKind::Switch { cases, default, .. } => {
+                assert_eq!(cases[0].action_name, "Case");
+                assert_eq!(cases[1].action_name, "Case_1");
+                assert!(default.is_none(), "empty default source -> None");
+            }
+            _ => panic!("expected Switch"),
+        }
+    }
+
+    #[test]
+    fn slice27_switch_nested_var_decl_is_error() {
+        // `var` in a case body must be rejected like in if/foreach bodies.
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var_ty("status", Type::String),
+                Stmt::Switch {
+                    subject: rref("status"),
+                    subject_span: sp(),
+                    cases: vec![crate::ast::SwitchCase {
+                        value: Literal::String("a".to_string()),
+                        body: vec![var("inner")],
+                        span: sp(),
+                    }],
+                    default: None,
+                    span: sp(),
+                },
+            ],
+        };
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::NestedVarDeclaration { name, .. } if name == "inner"
+        ));
+    }
+
+    #[test]
+    fn slice27_switch_let_in_case_does_not_leak() {
+        // Regression: per-case `let` bindings must scope to their own branch,
+        // paralleling if-branch scoping.
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var_ty("status", Type::String),
+                Stmt::Switch {
+                    subject: rref("status"),
+                    subject_span: sp(),
+                    cases: vec![crate::ast::SwitchCase {
+                        value: Literal::String("a".to_string()),
+                        body: vec![let_stmt("inner", Expr::Literal(Literal::Int(1)))],
+                        span: sp(),
+                    }],
+                    default: None,
+                    span: sp(),
+                },
+                let_stmt("leak", rref("inner")),
+            ],
+        };
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::UndefinedVariable { name, .. } if name == "inner"
+        ));
     }
 
     #[test]

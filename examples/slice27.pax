@@ -1,0 +1,58 @@
+// Slice 27: switch statement.
+//
+// `switch` dispatches on a subject value, matching against scalar case
+// literals (string / int / bool) and falling through to an optional
+// `default` arm when no case matches. Compiles to PA's Switch action.
+//
+// Case values must be literals, not expressions -- PA's Switch has the
+// same constraint. If no case matches and there's no default, the switch
+// is a no-op.
+
+trigger manual
+
+var status: string = "active"
+var tag: string = ""
+
+switch status {
+    case "active" {
+        tag = "ACTIVE"
+    }
+    case "pending" {
+        tag = "PENDING"
+    }
+    case "archived" {
+        tag = "ARCHIVED"
+    }
+    default {
+        tag = "UNKNOWN"
+    }
+}
+
+// Integer cases work the same way.
+var code: int = 2
+var label: string = ""
+
+switch code {
+    case 1 {
+        label = "one"
+    }
+    case 2 {
+        label = "two"
+    }
+    case 3 {
+        label = "three"
+    }
+}
+
+// A switch without a default arm is legal. When nothing matches, no
+// action fires.
+var flag: bool = false
+var message: string = "untouched"
+
+switch flag {
+    case true {
+        message = "flagged"
+    }
+}
+
+debug(tag, label, message)

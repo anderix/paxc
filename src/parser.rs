@@ -4,8 +4,8 @@
 //! declarations and builds a `Program` AST.
 
 use crate::ast::{
-    AssignOp, BinOp, DebugArg, Expr, Frequency, Literal, Program, Stmt, TerminateStatus, Trigger,
-    Type, UnaryOp,
+    AssignOp, BinOp, DebugArg, Expr, Frequency, Literal, Program, Stmt, SwitchCase,
+    TerminateStatus, Trigger, Type, UnaryOp,
 };
 use crate::lexer::{Span, Token};
 use chumsky::{input::ValueInput, prelude::*};
@@ -346,10 +346,50 @@ where
                 span: e.span(),
             });
 
+        // Case values are restricted to scalar literals (string / int / bool),
+        // matching PA's constraint. Arbitrary expressions are not allowed.
+        let case_literal = select! {
+            Token::Int(n) => Literal::Int(n),
+            Token::Str(s) => Literal::String(s),
+            Token::Bool(b) => Literal::Bool(b),
+        }
+        .labelled("case value (string, int, or bool literal)");
+
+        let switch_case = just(Token::Case)
+            .ignore_then(case_literal)
+            .then(block.clone())
+            .map_with(|(value, body), e| SwitchCase {
+                value,
+                body,
+                span: e.span(),
+            });
+
+        let default_arm = just(Token::Default).ignore_then(block.clone());
+
+        let switch_body = switch_case
+            .repeated()
+            .collect::<Vec<_>>()
+            .then(default_arm.or_not())
+            .delimited_by(just(Token::LBrace), just(Token::RBrace));
+
+        let switch_stmt = just(Token::Switch)
+            .ignore_then(
+                expr.clone().map_with(|cond, e| (cond, e.span())),
+            )
+            .then(switch_body)
+            .map_with(|((subject, subject_span), (cases, default)), e| Stmt::Switch {
+                subject,
+                subject_span,
+                cases,
+                default,
+                span: e.span(),
+            });
+
         var_decl
             .or(let_decl)
             .or(if_stmt)
             .or(foreach_stmt)
+            .or(switch_stmt)
             .or(raw_stmt)
             .or(debug_stmt)
             .or(terminate_stmt)
@@ -696,6 +736,72 @@ mod tests {
             result.has_errors(),
             "expected parse error: message only valid with failed"
         );
+    }
+
+    #[test]
+    fn slice27_switch_parses_with_cases_and_default() {
+        let prog = parse(
+            r#"var status: string = "active"
+switch status {
+  case "active" {
+  }
+  case "pending" {
+  }
+  default {
+  }
+}"#,
+        );
+        match &prog.statements[1] {
+            Stmt::Switch { cases, default, .. } => {
+                assert_eq!(cases.len(), 2);
+                assert!(matches!(&cases[0].value, Literal::String(s) if s == "active"));
+                assert!(matches!(&cases[1].value, Literal::String(s) if s == "pending"));
+                assert!(
+                    matches!(default, Some(v) if v.is_empty()),
+                    "empty default block preserved as Some(vec![])"
+                );
+            }
+            other => panic!("expected switch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slice27_switch_without_default_parses() {
+        let prog = parse("var n: int = 1\nswitch n { case 1 { } case 2 { } }");
+        match &prog.statements[1] {
+            Stmt::Switch { cases, default, .. } => {
+                assert_eq!(cases.len(), 2);
+                assert!(default.is_none(), "default absent -> None");
+            }
+            _ => panic!("expected switch"),
+        }
+    }
+
+    #[test]
+    fn slice27_switch_empty_cases_parses() {
+        // A switch with only a default arm is degenerate but legal.
+        let prog = parse("var n: int = 1\nswitch n { default { } }");
+        match &prog.statements[1] {
+            Stmt::Switch { cases, default, .. } => {
+                assert!(cases.is_empty());
+                assert!(matches!(default, Some(v) if v.is_empty()));
+            }
+            _ => panic!("expected switch"),
+        }
+    }
+
+    #[test]
+    fn slice27_switch_rejects_expression_case_value() {
+        // Case values must be literals, not expressions. PA enforces the
+        // same constraint in its Switch action.
+        let src = "trigger manual\nvar n: int = 1\nswitch n { case 1 + 1 { } }";
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        let result = parser().parse(
+            tokens
+                .as_slice()
+                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+        );
+        assert!(result.has_errors(), "case values must be literals");
     }
 
     #[test]

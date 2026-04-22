@@ -110,6 +110,30 @@ pub enum Stmt {
         message: Option<Expr>,
         span: Span,
     },
+    /// `switch <subject> { case <literal> { ... } ... default { ... } }`.
+    /// Lowers to PA's Switch action. Case values are scalar literals only
+    /// (string / int / bool), matching PA's constraint -- no arbitrary
+    /// expressions in the case clause. `default` is `None` when the source
+    /// omitted the default arm entirely, `Some(vec![])` when the source
+    /// wrote an explicitly empty `default { }` block -- PA emits the default
+    /// key based on source intent.
+    Switch {
+        subject: Expr,
+        /// Span of the subject expression, used by paxr verbose traces.
+        subject_span: Span,
+        cases: Vec<SwitchCase>,
+        default: Option<Vec<Stmt>>,
+        /// Span of the whole statement, used for runtime-error localization.
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchCase {
+    pub value: Literal,
+    pub body: Vec<Stmt>,
+    /// Span of the case keyword + value, used for diagnostics.
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
