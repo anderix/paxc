@@ -15,7 +15,7 @@ use crate::ast::{
     AssignOp, DebugArg, Expr, HandlerStatus, Literal, Program, Stmt, TerminateStatus, Trigger, Type,
 };
 use crate::lexer::Span;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 #[derive(Debug, Clone)]
@@ -337,13 +337,24 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
     // (named scopes and raw blocks today). Populated as we resolve each
     // `scope <name>` and `raw <name>` block; consumed when an `on` handler
     // references a target by name. Variable name is historical -- the
-    // registry covers both scopes and raw blocks now.
+    // registry covers both scopes and raw blocks now. This map ROLLS BACK
+    // at block exit, so handler resolution only sees targets visible at
+    // the handler's declaration point -- a scope inside an if-branch is
+    // not a visible handler target once the branch ends.
     let mut named_scopes: HashMap<String, String> = HashMap::new();
+    // Every source-level handler target name ever declared, regardless of
+    // nesting. Does NOT roll back at block exit. Used solely for duplicate
+    // detection so that `scope foo` inside an if-branch followed by
+    // `scope foo` at sibling or outer level is rejected. Both kinds of
+    // block (scope / raw) share this namespace; PA would otherwise end up
+    // with two identically-labeled actions in the compiled flow.
+    let mut declared_targets: HashSet<String> = HashSet::new();
     let actions = resolve_statements(
         &program.statements,
         &mut env,
         &mut name_counts,
         &mut named_scopes,
+        &mut declared_targets,
         true,
     )?;
     Ok(ResolvedProgram {
@@ -360,6 +371,7 @@ fn resolve_statements(
     env: &mut HashMap<String, Binding>,
     name_counts: &mut HashMap<String, u32>,
     named_scopes: &mut HashMap<String, String>,
+    declared_targets: &mut HashSet<String>,
     top_level: bool,
 ) -> Result<Vec<ResolvedAction>, ResolveError> {
     let mut actions: Vec<ResolvedAction> = Vec::with_capacity(statements.len());
@@ -438,11 +450,16 @@ fn resolve_statements(
                 }
             }
             Stmt::Raw { name, body, span } => {
-                // Enforce uniqueness across every handler target visible at
-                // this point in the program. Scopes and raw blocks share one
-                // namespace; the map would silently overwrite otherwise,
-                // misrouting any later `on <status> <name>` handler.
-                if named_scopes.contains_key(name) {
+                // Enforce uniqueness across every handler target ever
+                // declared in the program. Scopes and raw blocks share one
+                // namespace; duplicates would produce two identically-
+                // labeled actions in the compiled flow and misroute any
+                // later `on <status> <name>` handler. Uses the permanent
+                // `declared_targets` set rather than the rollback-able
+                // `named_scopes` map so that a nested duplicate followed by
+                // an outer sibling is caught (e.g. `scope foo` inside an
+                // if-branch, then `scope foo` at workflow level).
+                if !declared_targets.insert(name.clone()) {
                     return Err(ResolveError::DuplicateHandlerTarget {
                         name: name.clone(),
                         span: *span,
@@ -477,11 +494,11 @@ fn resolve_statements(
                 let saved_env = env.clone();
                 let saved_named_scopes = named_scopes.clone();
                 let true_actions =
-                    resolve_statements(true_branch, env, name_counts, named_scopes, false)?;
+                    resolve_statements(true_branch, env, name_counts, named_scopes, declared_targets, false)?;
                 *env = saved_env.clone();
                 *named_scopes = saved_named_scopes.clone();
                 let false_actions =
-                    resolve_statements(false_branch, env, name_counts, named_scopes, false)?;
+                    resolve_statements(false_branch, env, name_counts, named_scopes, declared_targets, false)?;
                 *env = saved_env;
                 *named_scopes = saved_named_scopes;
                 (
@@ -514,7 +531,7 @@ fn resolve_statements(
                     },
                 );
                 let body_actions =
-                    resolve_statements(body, env, name_counts, named_scopes, false)?;
+                    resolve_statements(body, env, name_counts, named_scopes, declared_targets, false)?;
                 *env = saved_env;
                 *named_scopes = saved_named_scopes;
                 (
@@ -571,7 +588,7 @@ fn resolve_statements(
                 // same as foreach/if-branches.
                 let saved_env = env.clone();
                 let saved_named_scopes = named_scopes.clone();
-                let body_actions = resolve_statements(body, env, name_counts, named_scopes, false)?;
+                let body_actions = resolve_statements(body, env, name_counts, named_scopes, declared_targets, false)?;
                 *env = saved_env;
                 *named_scopes = saved_named_scopes;
                 (
@@ -591,12 +608,13 @@ fn resolve_statements(
                 body,
                 span,
             } => {
-                // Enforce uniqueness across every handler target visible at
-                // this point in the program. Scopes and raw blocks share one
-                // namespace; duplicates would silently overwrite in the
-                // registry, misrouting any later `on <status> <name>` handler.
+                // Enforce uniqueness across every handler target ever
+                // declared in the program. Scopes and raw blocks share one
+                // namespace. See the equivalent check in the Raw arm for
+                // the rationale (uses the permanent `declared_targets` set
+                // so nested duplicates are caught by later siblings).
                 if let Some(n) = scope_name
-                    && named_scopes.contains_key(n)
+                    && !declared_targets.insert(n.clone())
                 {
                     return Err(ResolveError::DuplicateHandlerTarget {
                         name: n.clone(),
@@ -620,7 +638,7 @@ fn resolve_statements(
                 // registered *inside* the body get rolled back.
                 let saved_env = env.clone();
                 let saved_named_scopes = named_scopes.clone();
-                let body_actions = resolve_statements(body, env, name_counts, named_scopes, false)?;
+                let body_actions = resolve_statements(body, env, name_counts, named_scopes, declared_targets, false)?;
                 *env = saved_env;
                 *named_scopes = saved_named_scopes;
                 (action_name, ActionKind::Scope { body: body_actions }, *span)
@@ -663,7 +681,7 @@ fn resolve_statements(
                 // block. Same rationale as Condition/Foreach/Until.
                 let saved_env = env.clone();
                 let saved_named_scopes = named_scopes.clone();
-                let body_actions = resolve_statements(body, env, name_counts, named_scopes, false)?;
+                let body_actions = resolve_statements(body, env, name_counts, named_scopes, declared_targets, false)?;
                 *env = saved_env;
                 *named_scopes = saved_named_scopes;
                 (
@@ -696,7 +714,7 @@ fn resolve_statements(
                     let case_action_name = unique_name("Case", name_counts);
                     *env = saved_env.clone();
                     *named_scopes = saved_named_scopes.clone();
-                    let body = resolve_statements(&case.body, env, name_counts, named_scopes, false)?;
+                    let body = resolve_statements(&case.body, env, name_counts, named_scopes, declared_targets, false)?;
                     resolved_cases.push(ResolvedSwitchCase {
                         action_name: case_action_name,
                         value: case.value.clone(),
@@ -707,7 +725,7 @@ fn resolve_statements(
                     Some(stmts) => {
                         *env = saved_env.clone();
                         *named_scopes = saved_named_scopes.clone();
-                        Some(resolve_statements(stmts, env, name_counts, named_scopes, false)?)
+                        Some(resolve_statements(stmts, env, name_counts, named_scopes, declared_targets, false)?)
                     }
                     None => None,
                 };
@@ -920,6 +938,29 @@ fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, Res
 mod tests {
     use super::*;
     use crate::ast::{Literal, Trigger, Type};
+    use crate::lexer::lexer;
+    use crate::parser::parser;
+    use chumsky::prelude::*;
+
+    /// Drive a pax source string all the way through lex + parse + resolve
+    /// so a test can observe resolve errors that originate in concrete
+    /// syntax. Prepends the manual trigger so shorter snippets remain valid.
+    fn resolve_source(src: &str) -> Result<ResolvedProgram, ResolveError> {
+        let src = format!("trigger manual\n{src}");
+        let tokens = lexer()
+            .parse(src.as_str())
+            .into_result()
+            .expect("lex failed");
+        let program = parser()
+            .parse(
+                tokens
+                    .as_slice()
+                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+            )
+            .into_result()
+            .expect("parse failed");
+        resolve(&program)
+    }
 
     fn sp() -> Span {
         (0..0).into()
@@ -1725,9 +1766,12 @@ mod tests {
     }
 
     #[test]
-    fn slice35_duplicate_across_if_branches_does_not_collide() {
-        // Branch-scoped named scopes roll back at branch exit, so the same
-        // name can appear in mutually-exclusive branches without colliding.
+    fn slice35_duplicate_across_if_branches_is_resolve_error() {
+        // Scope/raw names are globally unique across the program, regardless
+        // of nesting. Two scopes with the same name -- even in mutually-
+        // exclusive branches -- are a resolve error. The strict rule keeps
+        // the mental model simple: every named handler target is unique in
+        // the source text.
         let prog = Program {
             trigger: Trigger::Manual,
             statements: vec![
@@ -1748,10 +1792,44 @@ mod tests {
                 },
             ],
         };
-        assert!(
-            resolve(&prog).is_ok(),
-            "same name in mutually-exclusive branches should resolve"
-        );
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::DuplicateHandlerTarget { name, .. } if name == "path"
+        ));
+    }
+
+    #[test]
+    fn slice35_nested_then_outer_same_name_is_resolve_error() {
+        // Regression for a code-review finding: when `scope foo` inside an
+        // if-branch is followed by a second `scope foo` at the enclosing
+        // level, the rollback of the inner registration previously let the
+        // outer duplicate slip through. With the permanent
+        // `declared_targets` set it's correctly rejected.
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var_ty("flag", Type::Bool),
+                Stmt::If {
+                    condition: rref("flag"),
+                    condition_span: sp(),
+                    true_branch: vec![Stmt::Scope {
+                        name: Some("foo".to_string()),
+                        body: vec![],
+                        span: sp(),
+                    }],
+                    false_branch: vec![],
+                },
+                Stmt::Scope {
+                    name: Some("foo".to_string()),
+                    body: vec![],
+                    span: sp(),
+                },
+            ],
+        };
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::DuplicateHandlerTarget { name, .. } if name == "foo"
+        ));
     }
 
     #[test]
@@ -1772,6 +1850,27 @@ mod tests {
             resolve(&prog).unwrap_err(),
             ResolveError::InvalidUntilLimit { value: 0, .. }
         ));
+    }
+
+    #[test]
+    fn slice34_until_max_zero_via_source_surfaces_diagnostic() {
+        // End-to-end coverage for a code-review finding: the parser accepts
+        // any Token::Int(n) for `max N`, so zero and negatives make it to
+        // the resolver. This asserts the resolver's range check fires and
+        // that the error span is the `max 0` clause (not the whole statement).
+        let err = resolve_source("var n: int = 0\nuntil n > 5 max 0 { n += 1 }")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ResolveError::InvalidUntilLimit { value: 0, .. }
+        ));
+        // Span should come from the `0` literal (the limit-count span set
+        // by the parser), not the statement span fallback.
+        let span = err.span();
+        assert!(
+            span.end > span.start,
+            "span should be non-empty"
+        );
     }
 
     #[test]
