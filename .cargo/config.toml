@@ -1,0 +1,8 @@
+# Project-local cargo config. Disables incremental compilation because
+# paxc's generic-heavy deps (chumsky) cause the incremental cache to
+# balloon to multi-GB in a single session. Compile speed is barely
+# affected -- the crate is small enough that from-scratch builds are
+# already fast -- and the dep cache in target/debug/deps/ stays warm
+# across builds either way.
+[build]
+incremental = false
