@@ -252,7 +252,20 @@ on succeeded fetch_data {
 }
 ```
 
-`on <status> [or <status>]* <target> { ... }` attaches a handler to a named scope. The handler runs when the target scope reports any of the listed statuses. Supported statuses are `succeeded`, `failed`, `skipped`, and `timedout`, which mirrors the set Power Automate's own `runAfter` accepts. Each handler compiles to a Power Automate `Scope` action whose `runAfter` points at the target with every listed status in the array.
+`on <status> [or <status>]* <target> { ... }` attaches a handler to a named scope or named raw block. The handler runs when the target reports any of the listed statuses. Supported statuses are `succeeded`, `failed`, `skipped`, and `timedout`, which mirrors the set Power Automate's own `runAfter` accepts. Each handler compiles to a Power Automate `Scope` action whose `runAfter` points at the target with every listed status in the array.
+
+Raw blocks are always valid handler targets without opt-in syntax -- their user-written name is also their PA action key. This is the most natural place to attach retry / recovery logic in the stub-and-fix workflow, because the action most likely to fail is usually a connector call living inside a raw block.
+
+```
+raw HTTP_Get_Order {
+  "type": "Http",
+  "inputs": { "method": "GET", "uri": "https://api.example.com/orders/123" }
+}
+
+on failed or timedout HTTP_Get_Order {
+  debug("recoverable call failure")
+}
+```
 
 Multi-status form uses `or` to join statuses:
 
@@ -268,7 +281,7 @@ Handlers sit off the main sibling chain. A statement written after any handlers 
 
 Multiple handlers on the same scope are independent parallel actions in the emitted graph. Handler action names follow the pattern `On_<status>_<target>` for a single-status handler, or `On_<status1>_<status2>_..._<target>` for a multi-status handler (for example, `On_failed_fetch_data` or `On_failed_timedout_fetch_data`), auto-suffixed if two handlers would otherwise collide.
 
-The target of an `on` handler must be a named scope declared somewhere earlier in the source. An unknown target raises a resolve error with a "not a named scope" diagnostic.
+The target of an `on` handler must be a named scope or raw block declared somewhere earlier in the source. An unknown target raises a resolve error with a "not a named scope or raw block" diagnostic.
 
 paxr walks the happy path, so any handler whose status list contains `succeeded` fires locally and its side effects appear in the end-of-run state dump. Handlers without `succeeded` in their list cannot be triggered from the interpreter, so paxr prints `<skipping on-<labels> handler "...">` and moves on without executing them. The compiled flow in Power Automate still dispatches them correctly at runtime.
 

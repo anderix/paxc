@@ -195,8 +195,9 @@ pub enum ResolveError {
     /// invalid definition.
     NestedVarDeclaration { name: String, span: Span },
     /// `on <status> <target> { ... }` named a target that no named scope
-    /// resolves to. Future versions may allow raw blocks or other named
-    /// actions as targets too; for now only `scope <name>` registers.
+    /// or raw block resolves to. `scope <name> { ... }` and `raw <name>
+    /// { ... }` both register as handler targets; future versions may
+    /// allow additional named actions.
     UnknownHandlerTarget { name: String, span: Span },
     /// Multi-status handler `on a or b or ... <target>` listed the same
     /// status twice. Redundant but usually a typo, so reject rather than
@@ -225,7 +226,7 @@ impl ResolveError {
             ResolveError::InvalidOperation { .. } => "invalid operation",
             ResolveError::CannotAssignToImmutable { .. } => "immutable binding",
             ResolveError::NestedVarDeclaration { .. } => "must be top-level",
-            ResolveError::UnknownHandlerTarget { .. } => "not a named scope",
+            ResolveError::UnknownHandlerTarget { .. } => "not a named scope or raw block",
             ResolveError::DuplicateHandlerStatus { .. } => "duplicate status",
         }
     }
@@ -268,7 +269,7 @@ impl fmt::Display for ResolveError {
             ResolveError::UnknownHandlerTarget { name, .. } => {
                 write!(
                     f,
-                    "`{name}` is not a named scope; `on` handlers attach to `scope <name> {{ ... }}`"
+                    "`{name}` is not a named scope or raw block; `on` handlers attach to `scope <name> {{ ... }}` or `raw <name> {{ ... }}`"
                 )
             }
             ResolveError::DuplicateHandlerStatus { status, .. } => {
@@ -298,9 +299,11 @@ fn type_name(ty: &Type) -> &'static str {
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
     let mut env: HashMap<String, Binding> = HashMap::new();
     let mut name_counts: HashMap<String, u32> = HashMap::new();
-    // Source name -> PA action name for every user-labeled scope. Populated
-    // as we resolve each `scope <name> { ... }`; consumed when an `on` handler
-    // references a target by name.
+    // Source name -> PA action name for every user-labeled handler target
+    // (named scopes and raw blocks today). Populated as we resolve each
+    // `scope <name>` and `raw <name>` block; consumed when an `on` handler
+    // references a target by name. Variable name is historical -- the
+    // registry covers both scopes and raw blocks now.
     let mut named_scopes: HashMap<String, String> = HashMap::new();
     let actions = resolve_statements(
         &program.statements,
@@ -402,6 +405,12 @@ fn resolve_statements(
             }
             Stmt::Raw { name, body, span } => {
                 let action_name = unique_name(name, name_counts);
+                // Register raw blocks in the handler-target registry so
+                // `on <status> <name>` handlers can attach to them. Raw
+                // blocks always have a user-written name (it becomes the
+                // PA action key verbatim), so this makes every raw block
+                // a valid handler target by default -- no opt-in syntax.
+                named_scopes.insert(name.clone(), action_name.clone());
                 (action_name, ActionKind::Raw { body: body.clone() }, *span)
             }
             Stmt::If {
@@ -1548,6 +1557,61 @@ mod tests {
             entry.statuses,
             vec!["Failed".to_string(), "TimedOut".to_string()],
             "both statuses appear in PA-capitalized form, source order preserved"
+        );
+    }
+
+    #[test]
+    fn slice33_on_handler_targets_a_raw_block() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                Stmt::Raw {
+                    name: "HTTP_Call".to_string(),
+                    body: vec![],
+                    span: sp(),
+                },
+                Stmt::OnHandler {
+                    statuses: vec![HandlerStatus::Failed],
+                    target: "HTTP_Call".to_string(),
+                    target_span: sp(),
+                    body: vec![],
+                    span: sp(),
+                },
+            ],
+        };
+        let resolved = resolve(&prog).unwrap();
+        assert_eq!(resolved.actions[0].name, "HTTP_Call");
+        assert_eq!(resolved.actions[1].name, "On_failed_HTTP_Call");
+        match &resolved.actions[1].kind {
+            ActionKind::OnHandler { target_action_name, .. } => {
+                assert_eq!(target_action_name, "HTTP_Call");
+            }
+            _ => panic!("expected OnHandler"),
+        }
+        assert_eq!(
+            resolved.actions[1].run_after[0].action_name,
+            "HTTP_Call",
+            "runAfter points at the raw block by its PA action name"
+        );
+    }
+
+    #[test]
+    fn slice33_unknown_handler_target_error_mentions_raw_too() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![Stmt::OnHandler {
+                statuses: vec![HandlerStatus::Failed],
+                target: "nope".to_string(),
+                target_span: sp(),
+                body: vec![],
+                span: sp(),
+            }],
+        };
+        let err = resolve(&prog).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("raw"),
+            "error message should mention raw blocks: {msg}"
         );
     }
 

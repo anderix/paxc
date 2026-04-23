@@ -1,0 +1,43 @@
+// Slice 33: `on` handlers attach to raw blocks too.
+//
+// Before: `on <status> <target>` required `<target>` to be a named scope.
+// Now: any named `raw` block is also a valid handler target, without any
+// opt-in syntax -- raw blocks always have a user-written name that
+// becomes the PA action key.
+//
+// That closes a natural gap in the stub-and-fix workflow: the most common
+// "action that can fail" in pax is a raw connector call (HTTP, SharePoint,
+// Outlook), not a scope wrapper. Handlers can now attach directly.
+
+trigger manual
+
+var outcome: string = ""
+
+// Raw connector call, as you'd stub today before filling in the real
+// connector after import. The block is `raw <name> { ... }` and that
+// `<name>` is both the PA action key AND a valid handler target.
+raw HTTP_Get_Order {
+    "type": "Http",
+    "inputs": {
+        "method": "GET",
+        "uri": "https://api.example.com/orders/123"
+    }
+}
+
+// Single-status handler on the raw block. Runs only if the HTTP call fails.
+on failed HTTP_Get_Order {
+    outcome = "http-failed"
+}
+
+// Multi-status handlers work the same on raw targets as on scope targets.
+on skipped or timedout HTTP_Get_Order {
+    outcome = "http-skipped-or-slow"
+}
+
+// A handler including `succeeded` fires on the paxr happy path, so paxr
+// will set outcome to "http-ok" in the end-of-run state dump.
+on succeeded HTTP_Get_Order {
+    outcome = "http-ok"
+}
+
+debug(outcome)

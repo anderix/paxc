@@ -994,6 +994,41 @@ n = 42"#,
     }
 
     #[test]
+    fn slice33_on_handler_targets_raw_block_emits_runafter_at_raw_name() {
+        let out = compile(
+            r#"var n: int = 0
+raw HTTP_Call {
+  "type": "Http",
+  "inputs": {
+    "method": "GET",
+    "uri": "https://api.example.com/data"
+  }
+}
+on failed HTTP_Call {
+  n = 1
+}
+n = 99"#,
+        );
+        let actions = out["definition"]["actions"].as_object().unwrap();
+        assert!(actions.contains_key("HTTP_Call"));
+        assert!(actions.contains_key("On_failed_HTTP_Call"));
+        let handler = &actions["On_failed_HTTP_Call"];
+        assert_eq!(
+            handler["runAfter"],
+            json!({ "HTTP_Call": ["Failed"] }),
+            "handler runAfter points at the raw block's PA action name"
+        );
+        // The n = 99 after the handler must chain back to HTTP_Call, not
+        // through the handler -- same off-main-chain rule as scope targets.
+        // `Set_n` inside the handler body takes the bare name; the outer
+        // n = 99 gets suffixed as Set_n_1.
+        assert_eq!(
+            actions["Set_n_1"]["runAfter"],
+            json!({ "HTTP_Call": ["Succeeded"] })
+        );
+    }
+
+    #[test]
     fn slice32_multi_status_handler_runafter_lists_every_status() {
         let out = compile(
             r#"var count: int = 0
