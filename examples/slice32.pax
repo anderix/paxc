@@ -1,0 +1,56 @@
+// Slice 32: multi-status `on` handlers.
+//
+// A handler can now react to any combination of statuses, joined with `or`:
+//
+//   on failed or timedout try_work { ... }
+//
+// Compiles to a PA Scope with a single runAfter entry whose status array
+// lists every status in source order. One handler, one Scope action, one
+// body -- no duplicate work across statuses that share the same recovery.
+//
+// paxr's happy path still holds: a multi-status handler whose list includes
+// `succeeded` fires locally; without `succeeded` it's announced and skipped,
+// same as a plain `on failed` today.
+
+trigger manual
+
+var trail: string = ""
+
+scope try_work {
+    trail &= "work"
+    raw HTTP_Call {
+        "type": "Http",
+        "inputs": {
+            "method": "GET",
+            "uri": "https://api.example.com/data"
+        }
+    }
+}
+
+// One handler covers both failure cases; in PA the runAfter array is
+// ["Failed", "TimedOut"] so either condition triggers this same body.
+on failed or timedout try_work {
+    trail &= " [recovered]"
+}
+
+// Three-status handler: `on skipped or failed or timedout` catches
+// anything that isn't a clean success.
+scope optional_sync {
+    trail &= " | sync"
+}
+
+on skipped or failed or timedout optional_sync {
+    trail &= " [skipped-or-failed]"
+}
+
+// A list that includes `succeeded` fires on the paxr happy path, so its
+// side effects appear in the state dump.
+scope log_step {
+    trail &= " | log"
+}
+
+on succeeded or failed log_step {
+    trail &= " [logged]"
+}
+
+debug(trail)

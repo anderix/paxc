@@ -477,27 +477,28 @@ impl<'src> Interpreter<'src> {
                 self.run_actions(body, false)?;
                 self.indent -= 1;
             }
-            ActionKind::OnHandler { status, body, .. } => {
+            ActionKind::OnHandler { statuses, body, .. } => {
                 // paxr walks the happy path: every scope's body succeeds.
-                // Under that assumption, the `on succeeded` handler fires
-                // and its body runs in the local simulation. The other
-                // handler statuses (failed / skipped / timedout) would only
-                // fire on a real PA failure -- paxr has no way to force
-                // one, so it surfaces a notice and skips.
-                match status {
-                    HandlerStatus::Succeeded => {
-                        self.trace(&format!("on succeeded {}", action.name));
-                        self.indent += 1;
-                        self.run_actions(body, false)?;
-                        self.indent -= 1;
-                    }
-                    _ => {
-                        self.print_notice(&format!(
-                            "<skipping on-{} handler \"{}\" (paxr cannot simulate non-success)>",
-                            status.as_label(),
-                            action.name
-                        ));
-                    }
+                // Under that assumption, a handler whose status list includes
+                // `succeeded` fires and its body runs in the local simulation.
+                // Handlers without `succeeded` would only fire on a real PA
+                // failure -- paxr has no way to force one, so it surfaces a
+                // notice listing every status and skips.
+                let label = statuses
+                    .iter()
+                    .map(|s| s.as_label())
+                    .collect::<Vec<_>>()
+                    .join("-or-");
+                if statuses.contains(&HandlerStatus::Succeeded) {
+                    self.trace(&format!("on {} {}", label, action.name));
+                    self.indent += 1;
+                    self.run_actions(body, false)?;
+                    self.indent -= 1;
+                } else {
+                    self.print_notice(&format!(
+                        "<skipping on-{} handler \"{}\" (paxr cannot simulate non-success)>",
+                        label, action.name
+                    ));
                 }
             }
             ActionKind::Until {
@@ -1686,6 +1687,47 @@ on succeeded work {
         assert!(matches!(
             state.vars.get("trail"),
             Some(Value::Str(s)) if s == "w-ok"
+        ));
+    }
+
+    #[test]
+    fn slice32_multi_status_handler_with_succeeded_runs_in_paxr() {
+        // A multi-status handler whose list contains `succeeded` fires on
+        // paxr's happy path, same as a plain `on succeeded` handler would.
+        let state = run(
+            r#"var trail: string = ""
+scope work {
+  trail &= "w"
+}
+on succeeded or failed work {
+  trail &= "-ok"
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            state.vars.get("trail"),
+            Some(Value::Str(s)) if s == "w-ok"
+        ));
+    }
+
+    #[test]
+    fn slice32_multi_status_handler_without_succeeded_is_skipped() {
+        // A multi-status handler whose list does NOT contain `succeeded`
+        // only fires on real PA failures; paxr skips it like a single
+        // `on failed` handler.
+        let state = run(
+            r#"var trail: string = ""
+scope work {
+  trail &= "w"
+}
+on failed or timedout work {
+  trail &= "-boom"
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            state.vars.get("trail"),
+            Some(Value::Str(s)) if s == "w"
         ));
     }
 

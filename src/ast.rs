@@ -110,14 +110,17 @@ pub enum Stmt {
         message: Option<Expr>,
         span: Span,
     },
-    /// `on <status> <target> { body }` -- error-path (or success-path)
-    /// handler attached to a named scope. Compiles to a PA Scope action
-    /// with a `runAfter` pointing at the target under the given status.
-    /// The handler does NOT become part of the source-order sibling chain;
-    /// statements following the handler chain their runAfter back to the
-    /// last real action before any handlers, like `debug()` does.
+    /// `on <status> [or <status>]* <target> { body }` -- error-path (or
+    /// success-path) handler attached to a named scope. Compiles to a PA
+    /// Scope action with a `runAfter` pointing at the target under each of
+    /// the listed statuses. The handler does NOT become part of the
+    /// source-order sibling chain; statements following the handler chain
+    /// their runAfter back to the last real action before any handlers,
+    /// like `debug()` does.
     OnHandler {
-        status: HandlerStatus,
+        /// One or more handler statuses, in source order. Parser guarantees
+        /// the vector is non-empty. Duplicates are rejected by the resolver.
+        statuses: Vec<HandlerStatus>,
         target: String,
         /// Span of the target identifier, used by the resolver's diagnostic
         /// when the target is unknown.

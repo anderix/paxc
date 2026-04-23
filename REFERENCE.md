@@ -252,15 +252,25 @@ on succeeded fetch_data {
 }
 ```
 
-`on <status> <target> { ... }` attaches a handler to a named scope. The handler runs when the target scope reports the matching status. Supported statuses are `succeeded`, `failed`, `skipped`, and `timedout`, which mirrors the set Power Automate's own `runAfter` accepts. Each handler compiles to a Power Automate `Scope` action whose `runAfter` points at the target with the single chosen status.
+`on <status> [or <status>]* <target> { ... }` attaches a handler to a named scope. The handler runs when the target scope reports any of the listed statuses. Supported statuses are `succeeded`, `failed`, `skipped`, and `timedout`, which mirrors the set Power Automate's own `runAfter` accepts. Each handler compiles to a Power Automate `Scope` action whose `runAfter` points at the target with every listed status in the array.
+
+Multi-status form uses `or` to join statuses:
+
+```
+on failed or timedout fetch_data {
+  debug("the fetch failed or timed out")
+}
+```
+
+That compiles to a single `Scope` action with `runAfter: { "Scope_fetch_data": ["Failed", "TimedOut"] }`. One handler, one body, covers both cases without duplication. Listing the same status twice (`on failed or failed ...`) is a resolve error, since it is almost always a typo.
 
 Handlers sit off the main sibling chain. A statement written after any handlers does not chain its `runAfter` through the handlers; it chains back to whatever real action came before them. In the example above, a statement after `on succeeded fetch_data` would chain to `Scope_fetch_data`, not to the handler. The "normal path" of the flow runs through the scope; handlers are side-attached safety nets.
 
-Multiple handlers on the same scope are independent parallel actions in the emitted graph. Handler action names follow the pattern `On_<status>_<target>` (for example, `On_failed_fetch_data`), auto-suffixed if a second handler with the same status and target is declared.
+Multiple handlers on the same scope are independent parallel actions in the emitted graph. Handler action names follow the pattern `On_<status>_<target>` for a single-status handler, or `On_<status1>_<status2>_..._<target>` for a multi-status handler (for example, `On_failed_fetch_data` or `On_failed_timedout_fetch_data`), auto-suffixed if two handlers would otherwise collide.
 
 The target of an `on` handler must be a named scope declared somewhere earlier in the source. An unknown target raises a resolve error with a "not a named scope" diagnostic.
 
-paxr walks the happy path, so `on succeeded` handlers fire locally and their side effects appear in the end-of-run state dump. The other statuses (`failed`, `skipped`, `timedout`) cannot be triggered from the interpreter, so paxr prints `<skipping on-<status> handler "...">` and moves on without executing them. The compiled flow in Power Automate still dispatches them correctly at runtime.
+paxr walks the happy path, so any handler whose status list contains `succeeded` fires locally and its side effects appear in the end-of-run state dump. Handlers without `succeeded` in their list cannot be triggered from the interpreter, so paxr prints `<skipping on-<labels> handler "...">` and moves on without executing them. The compiled flow in Power Automate still dispatches them correctly at runtime.
 
 ### terminate
 

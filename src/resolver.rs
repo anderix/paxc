@@ -138,14 +138,16 @@ pub enum ActionKind {
         condition_span: Span,
         body: Vec<ResolvedAction>,
     },
-    /// `on <status> <target> { body }` -- handler attached to a named scope
-    /// (or, in the future, any named action). Compiles to a PA Scope action
-    /// whose `runAfter` points at the target with a single status. The
-    /// handler does not participate in the source-order sibling chain: the
-    /// resolver skips updating `prev_name` when emitting it, so the next
-    /// real statement chains back to whatever came before.
+    /// `on <status> [or <status>]* <target> { body }` -- handler attached to
+    /// a named scope (or, in the future, any named action). Compiles to a PA
+    /// Scope action whose `runAfter` points at the target with one or more
+    /// statuses. The handler does not participate in the source-order sibling
+    /// chain: the resolver skips updating `prev_name` when emitting it, so
+    /// the next real statement chains back to whatever came before.
     OnHandler {
-        status: HandlerStatus,
+        /// One or more handler statuses, in source order, guaranteed unique
+        /// by the resolver's duplicate check.
+        statuses: Vec<HandlerStatus>,
         /// PA action name of the target (e.g. `Scope_try_work`), already
         /// resolved from the source-level label (`try_work`).
         target_action_name: String,
@@ -196,6 +198,10 @@ pub enum ResolveError {
     /// resolves to. Future versions may allow raw blocks or other named
     /// actions as targets too; for now only `scope <name>` registers.
     UnknownHandlerTarget { name: String, span: Span },
+    /// Multi-status handler `on a or b or ... <target>` listed the same
+    /// status twice. Redundant but usually a typo, so reject rather than
+    /// silently dedup.
+    DuplicateHandlerStatus { status: HandlerStatus, span: Span },
 }
 
 impl ResolveError {
@@ -206,7 +212,8 @@ impl ResolveError {
             | ResolveError::InvalidOperation { span, .. }
             | ResolveError::CannotAssignToImmutable { span, .. }
             | ResolveError::NestedVarDeclaration { span, .. }
-            | ResolveError::UnknownHandlerTarget { span, .. } => *span,
+            | ResolveError::UnknownHandlerTarget { span, .. }
+            | ResolveError::DuplicateHandlerStatus { span, .. } => *span,
         }
     }
 
@@ -219,6 +226,7 @@ impl ResolveError {
             ResolveError::CannotAssignToImmutable { .. } => "immutable binding",
             ResolveError::NestedVarDeclaration { .. } => "must be top-level",
             ResolveError::UnknownHandlerTarget { .. } => "not a named scope",
+            ResolveError::DuplicateHandlerStatus { .. } => "duplicate status",
         }
     }
 }
@@ -261,6 +269,13 @@ impl fmt::Display for ResolveError {
                 write!(
                     f,
                     "`{name}` is not a named scope; `on` handlers attach to `scope <name> {{ ... }}`"
+                )
+            }
+            ResolveError::DuplicateHandlerStatus { status, .. } => {
+                write!(
+                    f,
+                    "status `{}` appears more than once in this handler",
+                    status.as_label()
                 )
             }
         }
@@ -531,22 +546,39 @@ fn resolve_statements(
                 (action_name, ActionKind::Scope { body: body_actions }, *span)
             }
             Stmt::OnHandler {
-                status,
+                statuses,
                 target,
                 target_span,
                 body,
                 span,
             } => {
+                // Parser guarantees `statuses` is non-empty. Reject repeats
+                // up front: they usually mean a typo like `failed or failed`.
+                let mut seen: Vec<HandlerStatus> = Vec::with_capacity(statuses.len());
+                for s in statuses {
+                    if seen.contains(s) {
+                        return Err(ResolveError::DuplicateHandlerStatus {
+                            status: *s,
+                            span: *span,
+                        });
+                    }
+                    seen.push(*s);
+                }
                 let target_action_name = named_scopes.get(target).cloned().ok_or_else(|| {
                     ResolveError::UnknownHandlerTarget {
                         name: target.clone(),
                         span: *target_span,
                     }
                 })?;
-                let action_name = unique_name(
-                    &format!("On_{}_{target}", status.as_label()),
-                    name_counts,
-                );
+                // Action name joins status labels in source order, so
+                // `on failed or timedout try_work` → `On_failed_timedout_try_work`.
+                let labels = statuses
+                    .iter()
+                    .map(|s| s.as_label())
+                    .collect::<Vec<_>>()
+                    .join("_");
+                let action_name =
+                    unique_name(&format!("On_{labels}_{target}"), name_counts);
                 // Handler body scopes its own registrations like any other
                 // block. Same rationale as Condition/Foreach/Until.
                 let saved_env = env.clone();
@@ -557,7 +589,7 @@ fn resolve_statements(
                 (
                     action_name,
                     ActionKind::OnHandler {
-                        status: *status,
+                        statuses: statuses.clone(),
                         target_action_name,
                         body: body_actions,
                     },
@@ -643,17 +675,18 @@ fn resolve_statements(
         }
 
         // `on` handlers are off the main sibling chain: their runAfter points
-        // at their target + filter status (set here), and the statement after
-        // the handler chains back to whatever came before, not the handler.
+        // at their target + filter statuses (set here), and the statement
+        // after the handler chains back to whatever came before, not the
+        // handler.
         if let ActionKind::OnHandler {
-            status,
+            statuses,
             target_action_name,
             ..
         } = &kind
         {
             let entry = RunAfterEntry {
                 action_name: target_action_name.clone(),
-                statuses: vec![status.as_pa_str().to_string()],
+                statuses: statuses.iter().map(|s| s.as_pa_str().to_string()).collect(),
             };
             actions.push(ResolvedAction {
                 name: action_name,
@@ -1322,7 +1355,7 @@ mod tests {
                     span: sp(),
                 },
                 Stmt::OnHandler {
-                    status: HandlerStatus::Failed,
+                    statuses: vec![HandlerStatus::Failed],
                     target: "try_work".to_string(),
                     target_span: sp(),
                     body: vec![],
@@ -1335,11 +1368,11 @@ mod tests {
         assert_eq!(resolved.actions[1].name, "On_failed_try_work");
         match &resolved.actions[1].kind {
             ActionKind::OnHandler {
-                status,
+                statuses,
                 target_action_name,
                 ..
             } => {
-                assert_eq!(*status, HandlerStatus::Failed);
+                assert_eq!(statuses, &vec![HandlerStatus::Failed]);
                 assert_eq!(target_action_name, "Scope_try_work");
             }
             _ => panic!("expected OnHandler"),
@@ -1361,7 +1394,7 @@ mod tests {
         let prog = Program {
             trigger: Trigger::Manual,
             statements: vec![Stmt::OnHandler {
-                status: HandlerStatus::Failed,
+                statuses: vec![HandlerStatus::Failed],
                 target: "nope".to_string(),
                 target_span: sp(),
                 body: vec![],
@@ -1396,7 +1429,7 @@ mod tests {
                     false_branch: vec![],
                 },
                 Stmt::OnHandler {
-                    status: HandlerStatus::Failed,
+                    statuses: vec![HandlerStatus::Failed],
                     target: "conditional_work".to_string(),
                     target_span: sp(),
                     body: vec![],
@@ -1427,7 +1460,7 @@ mod tests {
                         span: sp(),
                     },
                     Stmt::OnHandler {
-                        status: HandlerStatus::Failed,
+                        statuses: vec![HandlerStatus::Failed],
                         target: "inner".to_string(),
                         target_span: sp(),
                         body: vec![],
@@ -1457,7 +1490,7 @@ mod tests {
                     span: sp(),
                 },
                 Stmt::OnHandler {
-                    status: HandlerStatus::Failed,
+                    statuses: vec![HandlerStatus::Failed],
                     target: "work".to_string(),
                     target_span: sp(),
                     body: vec![],
@@ -1474,6 +1507,74 @@ mod tests {
             "Scope_work",
             "next action must chain to the scope, not the handler"
         );
+    }
+
+    #[test]
+    fn slice32_multi_status_handler_joins_statuses_in_runafter() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                Stmt::Scope {
+                    name: Some("try_work".to_string()),
+                    body: vec![],
+                    span: sp(),
+                },
+                Stmt::OnHandler {
+                    statuses: vec![HandlerStatus::Failed, HandlerStatus::TimedOut],
+                    target: "try_work".to_string(),
+                    target_span: sp(),
+                    body: vec![],
+                    span: sp(),
+                },
+            ],
+        };
+        let resolved = resolve(&prog).unwrap();
+        assert_eq!(
+            resolved.actions[1].name, "On_failed_timedout_try_work",
+            "action name joins status labels in source order"
+        );
+        match &resolved.actions[1].kind {
+            ActionKind::OnHandler { statuses, .. } => {
+                assert_eq!(
+                    statuses,
+                    &vec![HandlerStatus::Failed, HandlerStatus::TimedOut]
+                );
+            }
+            _ => panic!("expected OnHandler"),
+        }
+        let entry = &resolved.actions[1].run_after[0];
+        assert_eq!(entry.action_name, "Scope_try_work");
+        assert_eq!(
+            entry.statuses,
+            vec!["Failed".to_string(), "TimedOut".to_string()],
+            "both statuses appear in PA-capitalized form, source order preserved"
+        );
+    }
+
+    #[test]
+    fn slice32_duplicate_handler_status_errors() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                Stmt::Scope {
+                    name: Some("try_work".to_string()),
+                    body: vec![],
+                    span: sp(),
+                },
+                Stmt::OnHandler {
+                    statuses: vec![HandlerStatus::Failed, HandlerStatus::Failed],
+                    target: "try_work".to_string(),
+                    target_span: sp(),
+                    body: vec![],
+                    span: sp(),
+                },
+            ],
+        };
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::DuplicateHandlerStatus { status, .. }
+                if status == HandlerStatus::Failed
+        ));
     }
 
     #[test]

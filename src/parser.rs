@@ -386,9 +386,11 @@ where
             .then(default_arm.or_not())
             .delimited_by(just(Token::LBrace), just(Token::RBrace));
 
-        // `on <status> <target> { body }` -- error-path handler attached to a
-        // named scope. Status keyword follows the same ident-select pattern as
-        // terminate's status (not reserved words, just recognized by the parser).
+        // `on <status> [or <status>]* <target> { body }` -- error-path
+        // handler attached to a named scope. Status keyword follows the same
+        // ident-select pattern as terminate's status (not reserved words, just
+        // recognized by the parser). Multi-status form joins siblings with
+        // `or`, mirroring the PA runAfter-status array under the hood.
         let handler_status = select! {
             Token::Ident("succeeded") => HandlerStatus::Succeeded,
             Token::Ident("failed") => HandlerStatus::Failed,
@@ -397,12 +399,26 @@ where
         }
         .labelled("handler status (succeeded, failed, skipped, or timedout)");
 
+        let handler_statuses = handler_status
+            .then(
+                just(Token::Ident("or"))
+                    .ignore_then(handler_status)
+                    .repeated()
+                    .collect::<Vec<HandlerStatus>>(),
+            )
+            .map(|(first, rest)| {
+                let mut v = Vec::with_capacity(1 + rest.len());
+                v.push(first);
+                v.extend(rest);
+                v
+            });
+
         let on_handler = just(Token::On)
-            .ignore_then(handler_status)
+            .ignore_then(handler_statuses)
             .then(name.map_with(|s, e| (s.to_string(), e.span())))
             .then(block.clone())
-            .map_with(|((status, (target, target_span)), body), e| Stmt::OnHandler {
-                status,
+            .map_with(|((statuses, (target, target_span)), body), e| Stmt::OnHandler {
+                statuses,
                 target,
                 target_span,
                 body,
@@ -828,8 +844,8 @@ on failed try_work {
 }"#,
         );
         match &prog.statements[1] {
-            Stmt::OnHandler { status, target, body, .. } => {
-                assert_eq!(*status, HandlerStatus::Failed);
+            Stmt::OnHandler { statuses, target, body, .. } => {
+                assert_eq!(statuses, &vec![HandlerStatus::Failed]);
                 assert_eq!(target, "try_work");
                 assert!(body.is_empty());
             }
@@ -848,7 +864,9 @@ on failed try_work {
             let src = format!("scope foo {{\n}}\non {kw} foo {{\n}}");
             let prog = parse(&src);
             match &prog.statements[1] {
-                Stmt::OnHandler { status, .. } => assert_eq!(*status, expected, "kw: {kw}"),
+                Stmt::OnHandler { statuses, .. } => {
+                    assert_eq!(statuses, &vec![expected], "kw: {kw}")
+                }
                 _ => panic!("expected OnHandler for {kw}"),
             }
         }
@@ -864,6 +882,50 @@ on failed try_work {
                 .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
         );
         assert!(result.has_errors());
+    }
+
+    #[test]
+    fn slice32_multi_status_handler_parses() {
+        let prog = parse(
+            r#"scope try_work {
+}
+on failed or timedout try_work {
+}"#,
+        );
+        match &prog.statements[1] {
+            Stmt::OnHandler { statuses, target, .. } => {
+                assert_eq!(
+                    statuses,
+                    &vec![HandlerStatus::Failed, HandlerStatus::TimedOut],
+                    "source order preserved"
+                );
+                assert_eq!(target, "try_work");
+            }
+            _ => panic!("expected OnHandler"),
+        }
+    }
+
+    #[test]
+    fn slice32_multi_status_handler_three_statuses() {
+        let prog = parse(
+            r#"scope work {
+}
+on failed or skipped or timedout work {
+}"#,
+        );
+        match &prog.statements[1] {
+            Stmt::OnHandler { statuses, .. } => {
+                assert_eq!(
+                    statuses,
+                    &vec![
+                        HandlerStatus::Failed,
+                        HandlerStatus::Skipped,
+                        HandlerStatus::TimedOut,
+                    ]
+                );
+            }
+            _ => panic!("expected OnHandler"),
+        }
     }
 
     #[test]

@@ -994,6 +994,52 @@ n = 42"#,
     }
 
     #[test]
+    fn slice32_multi_status_handler_runafter_lists_every_status() {
+        let out = compile(
+            r#"var count: int = 0
+scope try_work {
+  count = 1
+}
+on failed or timedout try_work {
+  count = 99
+}"#,
+        );
+        let actions = out["definition"]["actions"].as_object().unwrap();
+        assert!(
+            actions.contains_key("On_failed_timedout_try_work"),
+            "action name joins status labels in source order"
+        );
+        let handler = &actions["On_failed_timedout_try_work"];
+        assert_eq!(handler["type"], "Scope");
+        assert_eq!(
+            handler["runAfter"],
+            json!({ "Scope_try_work": ["Failed", "TimedOut"] }),
+            "runAfter array carries every status, PA-capitalized, source order"
+        );
+    }
+
+    #[test]
+    fn slice32_multi_status_handler_with_succeeded_still_off_main_chain() {
+        // A handler that includes succeeded in its status list must still be
+        // off the source-order sibling chain. The action following chains
+        // back to the named scope, not the handler.
+        let out = compile(
+            r#"var n: int = 0
+scope work {
+}
+on succeeded or failed work {
+}
+n = 42"#,
+        );
+        let actions = &out["definition"]["actions"];
+        assert_eq!(
+            actions["Set_n"]["runAfter"],
+            json!({ "Scope_work": ["Succeeded"] }),
+            "next action chains back to the scope, never through a handler"
+        );
+    }
+
+    #[test]
     fn slice30_multiple_handlers_on_same_scope() {
         let out = compile(
             r#"scope work {
