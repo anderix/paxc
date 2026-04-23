@@ -293,6 +293,8 @@ Multiple handlers on the same scope are independent parallel actions in the emit
 
 The target of an `on` handler must be a named scope or raw block declared somewhere earlier in the source. An unknown target raises a resolve error with a "not a named scope or raw block" diagnostic.
 
+Handler targets share one namespace: named scopes and raw blocks compete for the same names at each point in the program. Declaring two blocks with the same name (two `scope work`, or a `scope foo` and a later `raw foo`, or two `raw HTTP_Call`) is a resolve error. The rule prevents a later `on <status> <name>` handler from silently attaching to the wrong block. Anonymous `scope { }` blocks do not register a name, so you can have any number of them. Branches of `if` / `else` / `foreach` / `switch` / `until` / `scope` bodies scope their name registrations locally, so the same name can appear in mutually-exclusive branches without colliding.
+
 paxr walks the happy path, so any handler whose status list contains `succeeded` fires locally and its side effects appear in the end-of-run state dump. Handlers without `succeeded` in their list cannot be triggered from the interpreter, so paxr prints `<skipping on-<labels> handler "...">` and moves on without executing them. The compiled flow in Power Automate still dispatches them correctly at runtime.
 
 ### terminate

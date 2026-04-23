@@ -215,6 +215,12 @@ pub enum ResolveError {
     /// limit count (strictly positive, fits in u32). Raised at resolve time
     /// because the parser accepts any int literal.
     InvalidUntilLimit { value: i64, span: Span },
+    /// A `scope <name>` or `raw <name>` block declared a name that was
+    /// already registered as a handler target earlier in the program. The
+    /// previous declaration would silently be shadowed in the registry,
+    /// which would misroute any later `on <status> <name>` handler.
+    /// Both kinds share one namespace.
+    DuplicateHandlerTarget { name: String, span: Span },
 }
 
 impl ResolveError {
@@ -227,7 +233,8 @@ impl ResolveError {
             | ResolveError::NestedVarDeclaration { span, .. }
             | ResolveError::UnknownHandlerTarget { span, .. }
             | ResolveError::DuplicateHandlerStatus { span, .. }
-            | ResolveError::InvalidUntilLimit { span, .. } => *span,
+            | ResolveError::InvalidUntilLimit { span, .. }
+            | ResolveError::DuplicateHandlerTarget { span, .. } => *span,
         }
     }
 
@@ -242,6 +249,7 @@ impl ResolveError {
             ResolveError::UnknownHandlerTarget { .. } => "not a named scope or raw block",
             ResolveError::DuplicateHandlerStatus { .. } => "duplicate status",
             ResolveError::InvalidUntilLimit { .. } => "invalid until limit",
+            ResolveError::DuplicateHandlerTarget { .. } => "name already used",
         }
     }
 }
@@ -297,6 +305,12 @@ impl fmt::Display for ResolveError {
                 write!(
                     f,
                     "`max {value}` is not a valid until limit; count must be a positive integer that fits in 32 bits"
+                )
+            }
+            ResolveError::DuplicateHandlerTarget { name, .. } => {
+                write!(
+                    f,
+                    "`{name}` is already used as a scope or raw block name earlier in the program; `on` handlers attach by name, so each handler target must be unique"
                 )
             }
         }
@@ -424,6 +438,16 @@ fn resolve_statements(
                 }
             }
             Stmt::Raw { name, body, span } => {
+                // Enforce uniqueness across every handler target visible at
+                // this point in the program. Scopes and raw blocks share one
+                // namespace; the map would silently overwrite otherwise,
+                // misrouting any later `on <status> <name>` handler.
+                if named_scopes.contains_key(name) {
+                    return Err(ResolveError::DuplicateHandlerTarget {
+                        name: name.clone(),
+                        span: *span,
+                    });
+                }
                 let action_name = unique_name(name, name_counts);
                 // Register raw blocks in the handler-target registry so
                 // `on <status> <name>` handlers can attach to them. Raw
@@ -567,17 +591,25 @@ fn resolve_statements(
                 body,
                 span,
             } => {
+                // Enforce uniqueness across every handler target visible at
+                // this point in the program. Scopes and raw blocks share one
+                // namespace; duplicates would silently overwrite in the
+                // registry, misrouting any later `on <status> <name>` handler.
+                if let Some(n) = scope_name
+                    && named_scopes.contains_key(n)
+                {
+                    return Err(ResolveError::DuplicateHandlerTarget {
+                        name: n.clone(),
+                        span: *span,
+                    });
+                }
                 let base = match scope_name {
                     Some(n) => format!("Scope_{n}"),
                     None => "Scope".to_string(),
                 };
                 let action_name = unique_name(&base, name_counts);
                 // Register named scopes so `on <status> <name>` handlers can
-                // resolve the source label to a PA action name. Duplicate
-                // source names silently overwrite (first one wins would be
-                // odd -- PA's own action names stay unique via suffixing, so
-                // a handler attaches to the most recent declaration). Not
-                // ideal; may revisit with a duplicate-name diagnostic.
+                // resolve the source label to a PA action name.
                 if let Some(n) = scope_name {
                     named_scopes.insert(n.clone(), action_name.clone());
                 }
@@ -1596,6 +1628,129 @@ mod tests {
             entry.statuses,
             vec!["Failed".to_string(), "TimedOut".to_string()],
             "both statuses appear in PA-capitalized form, source order preserved"
+        );
+    }
+
+    #[test]
+    fn slice35_duplicate_scope_name_is_resolve_error() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                Stmt::Scope {
+                    name: Some("work".to_string()),
+                    body: vec![],
+                    span: sp(),
+                },
+                Stmt::Scope {
+                    name: Some("work".to_string()),
+                    body: vec![],
+                    span: sp(),
+                },
+            ],
+        };
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::DuplicateHandlerTarget { name, .. } if name == "work"
+        ));
+    }
+
+    #[test]
+    fn slice35_duplicate_raw_name_is_resolve_error() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                Stmt::Raw {
+                    name: "HTTP_Call".to_string(),
+                    body: vec![],
+                    span: sp(),
+                },
+                Stmt::Raw {
+                    name: "HTTP_Call".to_string(),
+                    body: vec![],
+                    span: sp(),
+                },
+            ],
+        };
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::DuplicateHandlerTarget { name, .. } if name == "HTTP_Call"
+        ));
+    }
+
+    #[test]
+    fn slice35_scope_and_raw_share_namespace() {
+        // `scope foo` followed by `raw foo` also collides -- both are
+        // handler targets and share one name registry.
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                Stmt::Scope {
+                    name: Some("foo".to_string()),
+                    body: vec![],
+                    span: sp(),
+                },
+                Stmt::Raw {
+                    name: "foo".to_string(),
+                    body: vec![],
+                    span: sp(),
+                },
+            ],
+        };
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::DuplicateHandlerTarget { name, .. } if name == "foo"
+        ));
+    }
+
+    #[test]
+    fn slice35_unnamed_scope_does_not_collide() {
+        // Anonymous `scope { }` doesn't register in the handler-target map,
+        // so multiple anonymous scopes remain fine.
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                Stmt::Scope {
+                    name: None,
+                    body: vec![],
+                    span: sp(),
+                },
+                Stmt::Scope {
+                    name: None,
+                    body: vec![],
+                    span: sp(),
+                },
+            ],
+        };
+        assert!(resolve(&prog).is_ok());
+    }
+
+    #[test]
+    fn slice35_duplicate_across_if_branches_does_not_collide() {
+        // Branch-scoped named scopes roll back at branch exit, so the same
+        // name can appear in mutually-exclusive branches without colliding.
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![
+                var_ty("flag", Type::Bool),
+                Stmt::If {
+                    condition: rref("flag"),
+                    condition_span: sp(),
+                    true_branch: vec![Stmt::Scope {
+                        name: Some("path".to_string()),
+                        body: vec![],
+                        span: sp(),
+                    }],
+                    false_branch: vec![Stmt::Scope {
+                        name: Some("path".to_string()),
+                        body: vec![],
+                        span: sp(),
+                    }],
+                },
+            ],
+        };
+        assert!(
+            resolve(&prog).is_ok(),
+            "same name in mutually-exclusive branches should resolve"
         );
     }
 
