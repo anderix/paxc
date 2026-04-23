@@ -295,16 +295,45 @@ where
                 })
         });
 
-        // `until <condition> { body }` -- PA's Until (do-while) loop. The
-        // condition is the exit condition.
+        // `until <condition> [max N] [timeout "PT30M"] { body }` -- PA's
+        // Until (do-while) loop. The condition is the exit condition. The
+        // two optional trailers tune PA's Until `limit` block; both are
+        // independent, both default to PA's built-in values when omitted.
+        // Fixed order: `max` first, then `timeout` -- reading order matches
+        // how users describe the loop ("run at most N times, for up to T").
+        let until_max = just(Token::Ident("max"))
+            .ignore_then(select! { Token::Int(n) => n }.map_with(|n, e| (n, e.span())))
+            .labelled("max iteration count (integer literal)");
+
+        let until_timeout = just(Token::Ident("timeout"))
+            .ignore_then(select! { Token::Str(s) => s })
+            .labelled("timeout (ISO 8601 duration string literal)");
+
         let until_stmt = just(Token::Until)
             .ignore_then(expr.clone().map_with(|cond, e| (cond, e.span())))
+            .then(until_max.or_not())
+            .then(until_timeout.or_not())
             .then(block.clone())
-            .map_with(|((condition, condition_span), body), e| Stmt::Until {
-                condition,
-                condition_span,
+            .map_with(|(
+                ((
+                    (condition, condition_span),
+                    max_clause,
+                ), timeout_clause),
                 body,
-                span: e.span(),
+            ), e| {
+                let (limit_count, limit_count_span) = match max_clause {
+                    Some((n, sp)) => (Some(n), Some(sp)),
+                    None => (None, None),
+                };
+                Stmt::Until {
+                    condition,
+                    condition_span,
+                    limit_count,
+                    limit_count_span,
+                    limit_timeout: timeout_clause,
+                    body,
+                    span: e.span(),
+                }
             });
 
         let foreach_stmt = just(Token::Foreach)
@@ -809,9 +838,85 @@ mod tests {
     fn slice29_until_parses() {
         let prog = parse("var n: int = 0\nuntil n > 5 { n += 1 }");
         match &prog.statements[1] {
-            Stmt::Until { body, .. } => assert_eq!(body.len(), 1),
+            Stmt::Until {
+                body,
+                limit_count,
+                limit_timeout,
+                ..
+            } => {
+                assert_eq!(body.len(), 1);
+                assert!(
+                    limit_count.is_none() && limit_timeout.is_none(),
+                    "bare until carries no user limits"
+                );
+            }
             _ => panic!("expected until"),
         }
+    }
+
+    #[test]
+    fn slice34_until_max_clause_parses() {
+        let prog = parse("var n: int = 0\nuntil n > 5 max 10 { n += 1 }");
+        match &prog.statements[1] {
+            Stmt::Until {
+                limit_count,
+                limit_timeout,
+                ..
+            } => {
+                assert_eq!(*limit_count, Some(10));
+                assert!(limit_timeout.is_none());
+            }
+            _ => panic!("expected until"),
+        }
+    }
+
+    #[test]
+    fn slice34_until_timeout_clause_parses() {
+        let prog = parse(
+            "var n: int = 0\nuntil n > 5 timeout \"PT30M\" { n += 1 }",
+        );
+        match &prog.statements[1] {
+            Stmt::Until {
+                limit_count,
+                limit_timeout,
+                ..
+            } => {
+                assert!(limit_count.is_none());
+                assert_eq!(limit_timeout.as_deref(), Some("PT30M"));
+            }
+            _ => panic!("expected until"),
+        }
+    }
+
+    #[test]
+    fn slice34_until_max_and_timeout_both_parse() {
+        let prog = parse(
+            "var n: int = 0\nuntil n > 5 max 10 timeout \"PT30M\" { n += 1 }",
+        );
+        match &prog.statements[1] {
+            Stmt::Until {
+                limit_count,
+                limit_timeout,
+                ..
+            } => {
+                assert_eq!(*limit_count, Some(10));
+                assert_eq!(limit_timeout.as_deref(), Some("PT30M"));
+            }
+            _ => panic!("expected until"),
+        }
+    }
+
+    #[test]
+    fn slice34_until_timeout_before_max_is_parse_error() {
+        // Fixed order: `max` must come before `timeout` when both appear.
+        let src = "trigger manual\nvar n: int = 0\nuntil n > 5 timeout \"PT30M\" max 10 { n += 1 }";
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
+        let result = parser().parse(
+            tokens
+                .as_slice()
+                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+        );
+        assert!(result.has_errors());
     }
 
     #[test]

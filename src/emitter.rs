@@ -147,8 +147,12 @@ fn emit_action(action: &ResolvedAction) -> Value {
         } => emit_switch(subject, cases, default.as_deref()),
         ActionKind::Scope { body } => emit_scope(body),
         ActionKind::Until {
-            condition, body, ..
-        } => emit_until(condition, body),
+            condition,
+            limit_count,
+            limit_timeout,
+            body,
+            ..
+        } => emit_until(condition, *limit_count, limit_timeout.as_deref(), body),
         ActionKind::OnHandler { body, .. } => emit_scope(body),
     };
     splice_run_after(body, &action.run_after)
@@ -163,11 +167,17 @@ fn emit_scope(body: &[ResolvedAction]) -> Value {
 
 /// PA requires `limit.count` and `limit.timeout` on every Until. paxc emits
 /// PA's own defaults (60 iterations, 1 hour) so surfaces stay consistent.
-/// User-tunable limits are a future extension (e.g. `until cond max 100 { ... }`).
+/// User overrides come in via `until cond max N timeout "..."` and land
+/// on the resolved ActionKind; these constants are the fallback.
 const UNTIL_DEFAULT_COUNT: u32 = 60;
 const UNTIL_DEFAULT_TIMEOUT: &str = "PT1H";
 
-fn emit_until(condition: &Expr, body: &[ResolvedAction]) -> Value {
+fn emit_until(
+    condition: &Expr,
+    limit_count: Option<u32>,
+    limit_timeout: Option<&str>,
+    body: &[ResolvedAction],
+) -> Value {
     // PA's Until expression is the exit condition; same auto-wrap rule as
     // If -- if the outer expression is already boolean (comparison / logical
     // op), skip the `equals(_, true)` wrap.
@@ -176,12 +186,14 @@ fn emit_until(condition: &Expr, body: &[ResolvedAction]) -> Value {
     } else {
         format!("@equals({}, true)", pa_expr(condition))
     };
+    let count = limit_count.unwrap_or(UNTIL_DEFAULT_COUNT);
+    let timeout = limit_timeout.unwrap_or(UNTIL_DEFAULT_TIMEOUT);
     json!({
         "type": "Until",
         "expression": expression,
         "limit": {
-            "count": UNTIL_DEFAULT_COUNT,
-            "timeout": UNTIL_DEFAULT_TIMEOUT,
+            "count": count,
+            "timeout": timeout,
         },
         "actions": build_actions_map(body),
     })
@@ -918,6 +930,45 @@ until n > 5 {
         let actions = out["definition"]["actions"].as_object().unwrap();
         assert!(!actions.contains_key("Increment_n"));
         assert!(u["actions"]["Increment_n"].is_object());
+    }
+
+    #[test]
+    fn slice34_until_max_overrides_count() {
+        let out = compile(
+            r#"var n: int = 0
+until n > 5 max 10 {
+  n += 1
+}"#,
+        );
+        let u = &out["definition"]["actions"]["Until"];
+        assert_eq!(u["limit"]["count"], 10);
+        assert_eq!(u["limit"]["timeout"], "PT1H", "timeout stays default");
+    }
+
+    #[test]
+    fn slice34_until_timeout_overrides_timeout() {
+        let out = compile(
+            r#"var n: int = 0
+until n > 5 timeout "PT30M" {
+  n += 1
+}"#,
+        );
+        let u = &out["definition"]["actions"]["Until"];
+        assert_eq!(u["limit"]["count"], 60, "count stays default");
+        assert_eq!(u["limit"]["timeout"], "PT30M");
+    }
+
+    #[test]
+    fn slice34_until_max_and_timeout_both_override() {
+        let out = compile(
+            r#"var n: int = 0
+until n > 5 max 5 timeout "PT10M" {
+  n += 1
+}"#,
+        );
+        let u = &out["definition"]["actions"]["Until"];
+        assert_eq!(u["limit"]["count"], 5);
+        assert_eq!(u["limit"]["timeout"], "PT10M");
     }
 
     #[test]

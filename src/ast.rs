@@ -129,16 +129,28 @@ pub enum Stmt {
         /// Span of the whole statement, used for runtime-error localization.
         span: Span,
     },
-    /// `until <condition> { body }` -- PA's Until (do-while) loop. The
-    /// condition is the EXIT condition: PA runs the body first, evaluates
-    /// the expression, and exits when it becomes true. paxc emits with PA's
-    /// default limit (60 iterations, PT1H timeout) -- user overrides are
-    /// not exposed in syntax yet.
+    /// `until <condition> [max N] [timeout "PT30M"] { body }` -- PA's Until
+    /// (do-while) loop. The condition is the EXIT condition: PA runs the body
+    /// first, evaluates the expression, and exits when it becomes true. When
+    /// `max` or `timeout` are omitted, paxc emits PA's defaults (60 iterations,
+    /// PT1H timeout). `max` must be a positive integer literal; `timeout` must
+    /// be a string literal holding an ISO 8601 duration.
     Until {
         condition: Expr,
         /// Source span of the condition expression, mirrors `If::condition_span`
         /// so paxr's verbose trace can show the source slice.
         condition_span: Span,
+        /// Optional `max N` iteration-count override, stored as the raw i64
+        /// from the int literal. Resolver validates range and promotes to u32.
+        /// None means "use PA's default count".
+        limit_count: Option<i64>,
+        /// Source span of the `max N` clause (the whole `max 5` text), for
+        /// diagnostics when the count is out of range.
+        limit_count_span: Option<Span>,
+        /// Optional `timeout "PT30M"` override. String literal content only;
+        /// paxc does not interpret ISO 8601 here -- PA validates it at import.
+        /// None means "use PA's default timeout".
+        limit_timeout: Option<String>,
         body: Vec<Stmt>,
         /// Span of the whole statement, used for runtime-error localization.
         span: Span,

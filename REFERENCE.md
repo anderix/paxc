@@ -215,7 +215,17 @@ until n >= 5 {
 
 `until` is Power Automate's do-while loop. The condition is the exit condition: the body runs at least once, then the condition evaluates, and the loop exits when the condition becomes true. Compiles to a PA `Until` action.
 
-paxc emits PA's default iteration limit (60) and timeout (`PT1H`, one hour) with every until. User-tunable limits are not yet exposed in pax syntax. paxr caps its own local iteration at 60 too so runaway conditions do not hang the interpreter; when the cap is hit, paxr exits the loop cleanly and prints `<until "Until" hit iteration cap of 60>` so you can tell a capped exit from a normal one.
+Two optional trailing clauses tune the loop's safety limits, matching PA's `limit` block:
+
+```
+until ok max 5 timeout "PT10M" {
+  ...
+}
+```
+
+`max N` sets the maximum iteration count; `N` must be a positive integer literal that fits in 32 bits. `timeout "..."` sets the wall-clock timeout as an ISO 8601 duration string literal. Both clauses are independent and optional. When either is omitted, paxc falls back to PA's own defaults (60 iterations and `PT1H`, one hour). The two clauses must appear in the order `max` first, `timeout` second, when both are present.
+
+paxr uses the user-set `max` (when present) to cap its local iteration; without one, it falls back to 60. When the cap is hit, paxr exits the loop cleanly and prints `<until "Until" hit iteration cap of N>` so you can tell a capped exit from a natural one. The `timeout` clause is ignored by paxr because the interpreter cannot simulate wall-clock time; the real flow in Power Automate still enforces it.
 
 As with `foreach`, a `terminate` inside the body halts both the loop and the enclosing program, and a `let` declared inside the body is scoped to the body.
 

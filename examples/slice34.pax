@@ -1,0 +1,55 @@
+// Slice 34: user-tunable `until` limits.
+//
+// PA's Until action requires two limit values: a max iteration count
+// and a timeout (ISO 8601 duration). paxc defaults both to PA's own
+// defaults (60 iterations, PT1H) when omitted. Users can override either
+// or both with the optional trailing clauses:
+//
+//   until <cond>                             // defaults: 60 / PT1H
+//   until <cond> max N                       // N / PT1H
+//   until <cond> timeout "PTxM"              // 60 / PTxM
+//   until <cond> max N timeout "PTxM"        // N / PTxM
+//
+// Fixed order: `max` first, `timeout` second when both appear.
+
+trigger manual
+
+// Short-polling scenario: check status up to 5 times, 10 minutes total.
+// paxr respects `max 5`, so simulation caps at 5 iterations with a
+// notice, not the default 60.
+var checked: int = 0
+var done: bool = false
+until done max 5 timeout "PT10M" {
+    checked += 1
+    // In a real flow, this would poll a connector. Here we flip the
+    // flag after 3 iterations so paxr exits cleanly before hitting the
+    // cap.
+    if checked >= 3 {
+        done = true
+    }
+}
+
+debug(checked)
+
+// Longer-horizon scenario: just extend the timeout, keep the default count.
+var rounds: int = 0
+var finished: bool = false
+until finished timeout "PT4H" {
+    rounds += 1
+    finished = true
+}
+
+debug(rounds)
+
+// max-only: bump the count higher than PA's default for a tighter poll
+// loop with its own retry budget.
+var attempts: int = 0
+var ok: bool = false
+until ok max 120 {
+    attempts += 1
+    if attempts >= 2 {
+        ok = true
+    }
+}
+
+debug(attempts)

@@ -504,9 +504,12 @@ impl<'src> Interpreter<'src> {
             ActionKind::Until {
                 condition,
                 condition_span,
+                limit_count,
                 body,
+                ..
             } => {
                 let source = source_slice(self.src, *condition_span);
+                let cap = limit_count.unwrap_or(UNTIL_ITERATION_CAP);
                 self.trace(&format!("until {} (exit: {source})", action.name));
                 let mut iters = 0u32;
                 loop {
@@ -528,13 +531,13 @@ impl<'src> Interpreter<'src> {
                         break;
                     }
                     iters += 1;
-                    if iters >= UNTIL_ITERATION_CAP {
+                    if iters >= cap {
                         // Match PA semantics: at the limit, exit the loop.
                         // Surface a notice so the user sees why execution
                         // stopped short of the exit condition.
                         self.print_notice(&format!(
                             "<until \"{}\" hit iteration cap of {}>",
-                            action.name, UNTIL_ITERATION_CAP
+                            action.name, cap
                         ));
                         break;
                     }
@@ -1784,6 +1787,42 @@ until n >= 3 {
         let state = run(
             r#"var n: int = 0
 until false {
+  n += 1
+}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            state.vars.get("n"),
+            Some(Value::Int(n)) if *n == UNTIL_ITERATION_CAP as i64
+        ));
+    }
+
+    #[test]
+    fn slice34_until_max_caps_paxr_at_user_value() {
+        // A user-set `max 3` caps paxr's local simulation at 3 iterations,
+        // overriding the default of 60. n increments 3 times and the loop
+        // surfaces the iteration-cap notice.
+        let state = run(
+            r#"var n: int = 0
+until false max 3 {
+  n += 1
+}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(state.vars.get("n"), Some(Value::Int(3))),
+            "n = 3 after the user-set cap fires, not 60"
+        );
+    }
+
+    #[test]
+    fn slice34_until_timeout_does_not_affect_paxr_cap() {
+        // paxr cannot simulate wall-clock time, so a user `timeout "..."`
+        // is ignored locally. The default iteration cap still applies when
+        // `max` isn't set -- here n goes up to 60.
+        let state = run(
+            r#"var n: int = 0
+until false timeout "PT1M" {
   n += 1
 }"#,
         )

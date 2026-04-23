@@ -128,14 +128,22 @@ pub enum ActionKind {
     Scope {
         body: Vec<ResolvedAction>,
     },
-    /// `until <condition> { body }` -- PA's Until loop. The condition is the
-    /// exit condition; body runs at least once. Emitter uses PA's default
-    /// limit (60 iterations, PT1H timeout); paxr caps iterations at 60 too,
-    /// producing a notice and stopping cleanly to mirror PA's cap behavior.
+    /// `until <condition> [max N] [timeout "..."] { body }` -- PA's Until
+    /// loop. The condition is the exit condition; body runs at least once.
+    /// `limit_count` / `limit_timeout` carry user overrides; when either is
+    /// `None` the emitter falls back to PA's defaults (60 iterations,
+    /// PT1H timeout). paxr uses `limit_count` when set to cap its local
+    /// simulation, so iteration-cap notices match what PA would do.
     Until {
         condition: Expr,
         /// Source span of the condition expression, mirrors Condition's span.
         condition_span: Span,
+        /// Validated iteration cap from `max N`; None means "PA default".
+        limit_count: Option<u32>,
+        /// ISO 8601 duration string from `timeout "..."`; None means "PA
+        /// default". paxc does not validate the string; PA validates on
+        /// import.
+        limit_timeout: Option<String>,
         body: Vec<ResolvedAction>,
     },
     /// `on <status> [or <status>]* <target> { body }` -- handler attached to
@@ -203,6 +211,10 @@ pub enum ResolveError {
     /// status twice. Redundant but usually a typo, so reject rather than
     /// silently dedup.
     DuplicateHandlerStatus { status: HandlerStatus, span: Span },
+    /// `until ... max N` with an N outside the valid range for PA's Until
+    /// limit count (strictly positive, fits in u32). Raised at resolve time
+    /// because the parser accepts any int literal.
+    InvalidUntilLimit { value: i64, span: Span },
 }
 
 impl ResolveError {
@@ -214,7 +226,8 @@ impl ResolveError {
             | ResolveError::CannotAssignToImmutable { span, .. }
             | ResolveError::NestedVarDeclaration { span, .. }
             | ResolveError::UnknownHandlerTarget { span, .. }
-            | ResolveError::DuplicateHandlerStatus { span, .. } => *span,
+            | ResolveError::DuplicateHandlerStatus { span, .. }
+            | ResolveError::InvalidUntilLimit { span, .. } => *span,
         }
     }
 
@@ -228,6 +241,7 @@ impl ResolveError {
             ResolveError::NestedVarDeclaration { .. } => "must be top-level",
             ResolveError::UnknownHandlerTarget { .. } => "not a named scope or raw block",
             ResolveError::DuplicateHandlerStatus { .. } => "duplicate status",
+            ResolveError::InvalidUntilLimit { .. } => "invalid until limit",
         }
     }
 }
@@ -277,6 +291,12 @@ impl fmt::Display for ResolveError {
                     f,
                     "status `{}` appears more than once in this handler",
                     status.as_label()
+                )
+            }
+            ResolveError::InvalidUntilLimit { value, .. } => {
+                write!(
+                    f,
+                    "`max {value}` is not a valid until limit; count must be a positive integer that fits in 32 bits"
                 )
             }
         }
@@ -501,10 +521,27 @@ fn resolve_statements(
             Stmt::Until {
                 condition,
                 condition_span,
+                limit_count,
+                limit_count_span,
+                limit_timeout,
                 body,
                 span,
             } => {
                 let condition = resolve_expr(condition, env)?;
+                // Validate the iteration count now; parser accepts any int
+                // literal but PA's Until count is a strictly-positive u32.
+                let validated_count = match limit_count {
+                    Some(n) => {
+                        if *n < 1 || *n > u32::MAX as i64 {
+                            return Err(ResolveError::InvalidUntilLimit {
+                                value: *n,
+                                span: limit_count_span.unwrap_or(*span),
+                            });
+                        }
+                        Some(*n as u32)
+                    }
+                    None => None,
+                };
                 let action_name = unique_name("Until", name_counts);
                 // Body scopes lets and named-scope registrations to itself,
                 // same as foreach/if-branches.
@@ -518,6 +555,8 @@ fn resolve_statements(
                     ActionKind::Until {
                         condition,
                         condition_span: *condition_span,
+                        limit_count: validated_count,
+                        limit_timeout: limit_timeout.clone(),
                         body: body_actions,
                     },
                     *span,
@@ -1558,6 +1597,46 @@ mod tests {
             vec!["Failed".to_string(), "TimedOut".to_string()],
             "both statuses appear in PA-capitalized form, source order preserved"
         );
+    }
+
+    #[test]
+    fn slice34_until_max_zero_is_resolve_error() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![Stmt::Until {
+                condition: Expr::Literal(Literal::Bool(false)),
+                condition_span: sp(),
+                limit_count: Some(0),
+                limit_count_span: Some(sp()),
+                limit_timeout: None,
+                body: vec![],
+                span: sp(),
+            }],
+        };
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::InvalidUntilLimit { value: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn slice34_until_max_negative_is_resolve_error() {
+        let prog = Program {
+            trigger: Trigger::Manual,
+            statements: vec![Stmt::Until {
+                condition: Expr::Literal(Literal::Bool(false)),
+                condition_span: sp(),
+                limit_count: Some(-5),
+                limit_count_span: Some(sp()),
+                limit_timeout: None,
+                body: vec![],
+                span: sp(),
+            }],
+        };
+        assert!(matches!(
+            resolve(&prog).unwrap_err(),
+            ResolveError::InvalidUntilLimit { value: -5, .. }
+        ));
     }
 
     #[test]
