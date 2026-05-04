@@ -15,7 +15,7 @@ use crate::ast::{
     AssignOp, DebugArg, Expr, HandlerStatus, Literal, Program, Stmt, TerminateStatus, Trigger, Type,
 };
 use crate::lexer::Span;
-use crate::pa::names::key_prefix;
+use crate::pa::names::{key_prefix, status};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -52,7 +52,7 @@ impl RunAfterEntry {
     pub fn succeeded(action_name: String) -> Self {
         Self {
             action_name,
-            statuses: vec!["Succeeded".to_string()],
+            statuses: vec![status::SUCCEEDED.to_string()],
         }
     }
 }
@@ -2199,5 +2199,20 @@ mod tests {
             }
             other => panic!("expected ComposeRef, got {other:?}"),
         }
+    }
+
+    /// Pin the sibling-chain status string so a future regression that
+    /// drifts away from PA's `Succeeded` capitalization breaks loudly.
+    /// Centralizing the constant in `pa::names::status` makes drift
+    /// less likely, but the test guards against an accidental edit
+    /// either there or in `RunAfterEntry::succeeded`.
+    #[test]
+    fn sibling_chain_runafter_uses_pa_canonical_succeeded() {
+        let resolved = resolve_source("var a: int = 1\nvar b: int = 2\n").unwrap();
+        assert_eq!(resolved.actions[1].run_after.len(), 1);
+        assert_eq!(
+            resolved.actions[1].run_after[0].statuses,
+            vec!["Succeeded".to_string()]
+        );
     }
 }

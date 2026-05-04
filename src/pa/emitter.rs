@@ -6,7 +6,7 @@
 //! resolver, so this layer is purely a tree-to-JSON translation.
 
 use crate::ast::{BinOp, Expr, Frequency, Literal, TerminateStatus, Trigger, Type, UnaryOp};
-use crate::pa::names::{action, trigger as trigger_type};
+use crate::pa::names::{action, trigger_type};
 use crate::resolver::{
     ActionKind, ResolvedAction, ResolvedProgram, ResolvedSwitchCase, RunAfterEntry,
 };

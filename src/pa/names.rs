@@ -65,8 +65,11 @@ pub mod key_prefix {
     pub const CONDITION: &str = "Condition";
 }
 
-/// Trigger types as written in the `type` field of each trigger.
-pub mod trigger {
+/// Trigger types as written in the `type` field of each trigger. Named
+/// `trigger_type` (not `trigger`) to keep the module-level identifier
+/// distinct from the AST's `Trigger` enum and from common local-variable
+/// names like `trigger` in emitter functions.
+pub mod trigger_type {
     pub const REQUEST: &str = "Request";
     pub const RECURRENCE: &str = "Recurrence";
 }
