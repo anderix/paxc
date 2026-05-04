@@ -889,11 +889,18 @@ fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, Res
     match expr {
         Expr::Literal(l) => Ok(Expr::Literal(l.clone())),
         Expr::Ref { name, span } => match env.get(name) {
-            Some(Binding::Var { .. }) => Ok(Expr::VarRef(name.clone())),
-            Some(Binding::Let { action_name }) => Ok(Expr::ComposeRef(action_name.clone())),
-            Some(Binding::Iterator { action_name }) => {
-                Ok(Expr::IteratorRef(action_name.clone()))
-            }
+            Some(Binding::Var { .. }) => Ok(Expr::VarRef {
+                name: name.clone(),
+                span: *span,
+            }),
+            Some(Binding::Let { action_name }) => Ok(Expr::ComposeRef {
+                action_name: action_name.clone(),
+                span: *span,
+            }),
+            Some(Binding::Iterator { action_name }) => Ok(Expr::IteratorRef {
+                action_name: action_name.clone(),
+                span: *span,
+            }),
             None => Err(ResolveError::UndefinedVariable {
                 name: name.clone(),
                 span: *span,
@@ -906,7 +913,7 @@ fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, Res
                 field: field.clone(),
             })
         }
-        Expr::VarRef(_) | Expr::ComposeRef(_) | Expr::IteratorRef(_) => Ok(expr.clone()),
+        Expr::VarRef { .. } | Expr::ComposeRef { .. } | Expr::IteratorRef { .. } => Ok(expr.clone()),
         Expr::BinaryOp { op, lhs, rhs } => {
             let lhs = resolve_expr(lhs, env)?;
             let rhs = resolve_expr(rhs, env)?;
@@ -1306,7 +1313,7 @@ mod tests {
         let var_action = &resolved.actions[1];
         match &var_action.kind {
             ActionKind::InitializeVariable { value, .. } => {
-                assert!(matches!(value, Expr::ComposeRef(s) if s == "Compose_total"));
+                assert!(matches!(value, Expr::ComposeRef { action_name, .. } if action_name == "Compose_total"));
             }
             _ => panic!("expected InitializeVariable"),
         }
@@ -2145,5 +2152,51 @@ mod tests {
             resolve(&prog).unwrap_err(),
             ResolveError::DuplicateVariable { name, .. } if name == "x"
         ));
+    }
+
+    /// Helper: extract the value-expression embedded in the n-th resolved
+    /// action when it is `InitializeVariable`.
+    fn init_value(p: &ResolvedProgram, idx: usize) -> &Expr {
+        match &p.actions[idx].kind {
+            ActionKind::InitializeVariable { value, .. } => value,
+            other => panic!("expected InitializeVariable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn varref_carries_originating_identifier_span() {
+        // The reference `total` on the second line is what should land in
+        // the resolved action; its span should match the identifier's
+        // location in source, not the enclosing action.
+        let src = "var total: int = 5\nvar mirror: int = total\n";
+        let resolved = resolve_source(src).unwrap();
+        let value = init_value(&resolved, 1);
+        match value {
+            Expr::VarRef { name, span } => {
+                assert_eq!(name, "total");
+                let prefix = "trigger manual\nvar total: int = 5\nvar mirror: int = ";
+                let expected_start = prefix.len();
+                assert_eq!(span.start, expected_start);
+                assert_eq!(span.end, expected_start + "total".len());
+            }
+            other => panic!("expected VarRef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composeref_carries_originating_identifier_span() {
+        let src = "let total = 5\nvar mirror: int = total\n";
+        let resolved = resolve_source(src).unwrap();
+        let value = init_value(&resolved, 1);
+        match value {
+            Expr::ComposeRef { action_name, span } => {
+                assert_eq!(action_name, "Compose_total");
+                let prefix = "trigger manual\nlet total = 5\nvar mirror: int = ";
+                let expected_start = prefix.len();
+                assert_eq!(span.start, expected_start);
+                assert_eq!(span.end, expected_start + "total".len());
+            }
+            other => panic!("expected ComposeRef, got {other:?}"),
+        }
     }
 }

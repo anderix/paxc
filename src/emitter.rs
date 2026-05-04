@@ -327,9 +327,9 @@ fn expr_to_json(value: &Expr) -> Value {
 /// Builds the inner text of a PA expression (everything that goes inside `@{...}`).
 fn pa_expr(expr: &Expr) -> String {
     match expr {
-        Expr::VarRef(name) => format!("variables('{name}')"),
-        Expr::ComposeRef(action_name) => format!("outputs('{action_name}')"),
-        Expr::IteratorRef(action_name) => format!("items('{action_name}')"),
+        Expr::VarRef { name, .. } => format!("variables('{name}')"),
+        Expr::ComposeRef { action_name, .. } => format!("outputs('{action_name}')"),
+        Expr::IteratorRef { action_name, .. } => format!("items('{action_name}')"),
         Expr::Member { target, field } => {
             format!("{}?['{}']", pa_expr(target), field.replace('\'', "''"))
         }

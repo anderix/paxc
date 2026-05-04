@@ -315,19 +315,23 @@ pub enum Expr {
     /// Unresolved identifier reference emitted by the parser. The resolver
     /// rewrites each occurrence into either `VarRef` or `ComposeRef`.
     Ref { name: String, span: Span },
-    /// Reference to a pax variable. Emits `@{variables('x')}`.
-    VarRef(String),
-    /// Reference to a `let` binding. The payload is the Compose action key
-    /// the resolver assigned to it. Emits `@{outputs('Compose_x')}`.
-    ComposeRef(String),
+    /// Reference to a pax variable. Emits `@{variables('x')}`. Span is the
+    /// originating identifier in source, preserved through resolve so
+    /// runtime errors at this ref point at the exact name in the source.
+    VarRef { name: String, span: Span },
+    /// Reference to a `let` binding. `action_name` is the Compose action key
+    /// the resolver assigned to it. Emits `@{outputs('Compose_x')}`. Span
+    /// is the originating identifier in source.
+    ComposeRef { action_name: String, span: Span },
     /// Member access `target.field`. Chains via nested Member nodes.
     Member {
         target: Box<Expr>,
         field: String,
     },
-    /// Reference to a foreach iterator. Payload is the `Apply_to_each` action
-    /// key the iterator belongs to. Emits `items('action_name')`.
-    IteratorRef(String),
+    /// Reference to a foreach iterator. `action_name` is the `Apply_to_each`
+    /// action key the iterator belongs to. Emits `items('action_name')`.
+    /// Span is the originating identifier in source.
+    IteratorRef { action_name: String, span: Span },
     /// Binary operator expression. Emits as a PA function call, e.g. `&` → `concat(lhs, rhs)`.
     BinaryOp {
         op: BinOp,

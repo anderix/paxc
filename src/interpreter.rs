@@ -620,21 +620,31 @@ impl<'src> Interpreter<'src> {
                 format!("internal error: unresolved ref {name} reached interpreter"),
                 *span,
             )),
-            Expr::VarRef(name) => self
+            Expr::VarRef { name, span } => self
                 .vars
                 .get(name)
                 .cloned()
-                .ok_or_else(|| err(format!("undefined variable {name}"))),
-            Expr::ComposeRef(action_name) => self
+                .ok_or_else(|| err_at(format!("undefined variable {name}"), *span)),
+            Expr::ComposeRef { action_name, span } => self
                 .compose_outputs
                 .get(action_name)
                 .cloned()
-                .ok_or_else(|| err(format!("compose output {action_name} not yet computed"))),
-            Expr::IteratorRef(action_name) => self
+                .ok_or_else(|| {
+                    err_at(
+                        format!("compose output {action_name} not yet computed"),
+                        *span,
+                    )
+                }),
+            Expr::IteratorRef { action_name, span } => self
                 .iterators
                 .get(action_name)
                 .cloned()
-                .ok_or_else(|| err(format!("iterator {action_name} has no current value"))),
+                .ok_or_else(|| {
+                    err_at(
+                        format!("iterator {action_name} has no current value"),
+                        *span,
+                    )
+                }),
             Expr::Member { target, field } => {
                 let target_val = self.eval(target)?;
                 match target_val {
