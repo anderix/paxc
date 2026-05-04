@@ -1,5 +1,6 @@
 use chumsky::prelude::*;
-use paxc::{diagnostic, emitter, lexer, packager, parser, resolver};
+use paxc::pa::{emitter, packager};
+use paxc::{diagnostic, lexer, parser, resolver};
 use std::path::{Path, PathBuf};
 use std::{env, fs, process};
 

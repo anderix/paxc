@@ -13,7 +13,7 @@
 //! export from a tenant, not guessed -- see `examples/tour.pax` and the
 //! packager tests for the artifact-matching invariants.
 
-use crate::emitter;
+use crate::pa::emitter;
 use crate::resolver::ResolvedProgram;
 use serde_json::{Map, Value, json};
 use std::fs::File;
