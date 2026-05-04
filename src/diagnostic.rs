@@ -35,9 +35,19 @@ impl Diagnostic {
 
     /// Render to stderr using ariadne. `filename` is used as the source id
     /// in the rendered header; `src` is the full source text.
+    ///
+    /// chumsky produces byte-offset spans, but ariadne's `Source` indexes by
+    /// char count. For ASCII-only source the two coincide; with multi-byte
+    /// UTF-8 (German umlauts, em-strings, etc.) they diverge and the
+    /// underline drifts -- or ariadne panics outright. Spans are translated
+    /// to char offsets here at the boundary.
     pub fn report(&self, filename: &str, src: &str) {
-        let offset = self
+        let primary_chars = self
             .primary
+            .as_ref()
+            .map(|(r, label)| (bytes_to_chars(src, r.clone()), label.clone()));
+
+        let offset = primary_chars
             .as_ref()
             .map(|(r, _)| r.start)
             .unwrap_or(0);
@@ -45,7 +55,7 @@ impl Diagnostic {
         let mut builder = Report::build(ReportKind::Error, (filename, offset..offset))
             .with_message(&self.message);
 
-        if let Some((range, label)) = &self.primary {
+        if let Some((range, label)) = &primary_chars {
             builder = builder.with_label(
                 Label::new((filename, range.clone()))
                     .with_message(label)
@@ -61,6 +71,17 @@ impl Diagnostic {
             .finish()
             .eprint((filename, Source::from(src)));
     }
+}
+
+/// Translate a chumsky byte-offset range into the char-offset range that
+/// ariadne expects. Out-of-bounds offsets are clamped to the source length
+/// so a malformed span renders defensively rather than panicking.
+fn bytes_to_chars(src: &str, byte_range: Range<usize>) -> Range<usize> {
+    let start_byte = byte_range.start.min(src.len());
+    let end_byte = byte_range.end.min(src.len()).max(start_byte);
+    let start_char = src[..start_byte].chars().count();
+    let span_chars = src[start_byte..end_byte].chars().count();
+    start_char..start_char + span_chars
 }
 
 /// Convert a chumsky lex error into a diagnostic.
@@ -231,6 +252,46 @@ mod tests {
         };
         let diag = from_resolve_error(&err);
         assert!(diag.notes.is_empty());
+    }
+
+    #[test]
+    fn bytes_to_chars_passes_ascii_through_untouched() {
+        let src = "let x = 42";
+        assert_eq!(bytes_to_chars(src, 4..5), 4..5);
+        assert_eq!(bytes_to_chars(src, 8..10), 8..10);
+    }
+
+    #[test]
+    fn bytes_to_chars_translates_multibyte_utf8() {
+        // "grüße" is 5 chars but 7 bytes (`ü` = 2 bytes, `ß` = 2 bytes).
+        let src = "var grüße = 1";
+        // Byte range 4..11 covers `grüße` (the identifier).
+        assert_eq!(bytes_to_chars(src, 4..11), 4..9);
+        // Byte range 6..8 is just the `ü`. In char land that is one char.
+        assert_eq!(bytes_to_chars(src, 6..8), 6..7);
+    }
+
+    #[test]
+    fn bytes_to_chars_clamps_out_of_bounds_defensively() {
+        let src = "hi";
+        // start past end: degenerate empty range at end-of-source.
+        assert_eq!(bytes_to_chars(src, 99..200), 2..2);
+    }
+
+    #[test]
+    fn report_does_not_panic_on_non_ascii_source() {
+        // Pre-fix, ariadne's char-indexed Source would receive byte-offset
+        // spans and either render under the wrong column or panic outright
+        // when the byte landed mid-codepoint. After translation the span
+        // is char-indexed and rendering is well-defined.
+        let src = "let greeting = \"grüße\"\nlet x = grüße\n";
+        // Span for the `ü` on line 2 in byte offsets:
+        let line2_start = src.find("let x").unwrap();
+        let u_byte = line2_start + "let x = gr".len();
+        let span: Span = (u_byte..u_byte + 2).into();
+        let diag = Diagnostic::spanned("test", span, "here");
+        // We just need this not to panic; ariadne writes to stderr.
+        diag.report("test.pax", src);
     }
 
     #[test]
