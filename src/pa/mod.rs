@@ -7,4 +7,5 @@
 //! pull it from here rather than inlining the string.
 
 pub mod emitter;
+pub mod names;
 pub mod packager;

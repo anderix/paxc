@@ -6,6 +6,7 @@
 //! resolver, so this layer is purely a tree-to-JSON translation.
 
 use crate::ast::{BinOp, Expr, Frequency, Literal, TerminateStatus, Trigger, Type, UnaryOp};
+use crate::pa::names::{action, trigger as trigger_type};
 use crate::resolver::{
     ActionKind, ResolvedAction, ResolvedProgram, ResolvedSwitchCase, RunAfterEntry,
 };
@@ -83,7 +84,7 @@ fn emit_trigger(trigger: &Trigger) -> Value {
     match trigger {
         Trigger::Manual => json!({
             "manual": {
-                "type": "Request",
+                "type": trigger_type::REQUEST,
                 "kind": "Button",
                 "inputs": {}
             }
@@ -98,7 +99,7 @@ fn emit_trigger(trigger: &Trigger) -> Value {
 fn emit_schedule_trigger(frequency: Frequency, interval: u32) -> Value {
     json!({
         "Recurrence": {
-            "type": "Recurrence",
+            "type": trigger_type::RECURRENCE,
             "recurrence": {
                 "frequency": frequency.as_pa_str(),
                 "interval": interval,
@@ -110,18 +111,18 @@ fn emit_schedule_trigger(frequency: Frequency, interval: u32) -> Value {
 fn emit_action(action: &ResolvedAction) -> Value {
     let body = match &action.kind {
         ActionKind::InitializeVariable { var, ty, value } => emit_initialize(var, ty, value),
-        ActionKind::SetVariable { var, value } => emit_mutation("SetVariable", var, value),
+        ActionKind::SetVariable { var, value } => emit_mutation(action::SET_VARIABLE, var, value),
         ActionKind::IncrementVariable { var, value } => {
-            emit_mutation("IncrementVariable", var, value)
+            emit_mutation(action::INCREMENT_VARIABLE, var, value)
         }
         ActionKind::DecrementVariable { var, value } => {
-            emit_mutation("DecrementVariable", var, value)
+            emit_mutation(action::DECREMENT_VARIABLE, var, value)
         }
         ActionKind::AppendToStringVariable { var, value } => {
-            emit_mutation("AppendToStringVariable", var, value)
+            emit_mutation(action::APPEND_TO_STRING_VARIABLE, var, value)
         }
         ActionKind::AppendToArrayVariable { var, value } => {
-            emit_mutation("AppendToArrayVariable", var, value)
+            emit_mutation(action::APPEND_TO_ARRAY_VARIABLE, var, value)
         }
         ActionKind::Compose { value, .. } => emit_compose(value),
         ActionKind::Raw { body } => emit_raw(body),
@@ -160,7 +161,7 @@ fn emit_action(action: &ResolvedAction) -> Value {
 
 fn emit_scope(body: &[ResolvedAction]) -> Value {
     json!({
-        "type": "Scope",
+        "type": action::SCOPE,
         "actions": build_actions_map(body),
     })
 }
@@ -189,7 +190,7 @@ fn emit_until(
     let count = limit_count.unwrap_or(UNTIL_DEFAULT_COUNT);
     let timeout = limit_timeout.unwrap_or(UNTIL_DEFAULT_TIMEOUT);
     json!({
-        "type": "Until",
+        "type": action::UNTIL,
         "expression": expression,
         "limit": {
             "count": count,
@@ -219,7 +220,7 @@ fn emit_switch(
     // wrote a `default` block, even if the block is empty, so round-tripping
     // the source's intent is preserved.
     let mut out = Map::new();
-    out.insert("type".to_string(), json!("Switch"));
+    out.insert("type".to_string(), json!(action::SWITCH));
     out.insert(
         "expression".to_string(),
         json!(expr_to_pa_field(subject)),
@@ -247,14 +248,14 @@ fn emit_terminate(status: TerminateStatus, message: Option<&Expr>) -> Value {
         inputs.insert("runError".to_string(), json!({ "message": expr_to_json(msg) }));
     }
     json!({
-        "type": "Terminate",
+        "type": action::TERMINATE,
         "inputs": Value::Object(inputs),
     })
 }
 
 fn emit_foreach(collection: &Expr, body: &[ResolvedAction]) -> Value {
     json!({
-        "type": "Foreach",
+        "type": action::FOREACH,
         "foreach": expr_to_pa_field(collection),
         "actions": build_actions_map(body),
     })
@@ -274,7 +275,7 @@ fn emit_condition(
         format!("@equals({}, true)", pa_expr(condition))
     };
     json!({
-        "type": "If",
+        "type": action::IF,
         "expression": expression,
         "actions": build_actions_map(true_branch),
         "else": {
@@ -293,7 +294,7 @@ fn is_boolean_expr(expr: &Expr) -> bool {
 
 fn emit_compose(value: &Expr) -> Value {
     json!({
-        "type": "Compose",
+        "type": action::COMPOSE,
         "inputs": expr_to_json(value),
     })
 }
@@ -403,7 +404,7 @@ fn emit_initialize(name: &str, ty: &Type, value: &Expr) -> Value {
     };
     let value_json = expr_to_json(value);
     json!({
-        "type": "InitializeVariable",
+        "type": action::INITIALIZE_VARIABLE,
         "inputs": {
             "variables": [
                 { "name": name, "type": ty_str, "value": value_json }

@@ -15,6 +15,7 @@ use crate::ast::{
     AssignOp, DebugArg, Expr, HandlerStatus, Literal, Program, Stmt, TerminateStatus, Trigger, Type,
 };
 use crate::lexer::Span;
+use crate::pa::names::key_prefix;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -395,7 +396,7 @@ fn resolve_statements(
                 let value = resolve_expr(value, env)?;
                 env.insert(name.clone(), Binding::Var { ty: ty.clone() });
                 let action_name =
-                    unique_name(&format!("Initialize_{name}"), name_counts);
+                    unique_name(&format!("{}_{name}", key_prefix::INITIALIZE), name_counts);
                 let kind = ActionKind::InitializeVariable {
                     var: name.clone(),
                     ty: ty.clone(),
@@ -411,7 +412,7 @@ fn resolve_statements(
                     });
                 }
                 let value = resolve_expr(value, env)?;
-                let action_name = unique_name(&format!("Compose_{name}"), name_counts);
+                let action_name = unique_name(&format!("{}_{name}", key_prefix::COMPOSE), name_counts);
                 env.insert(
                     name.clone(),
                     Binding::Let {
@@ -481,7 +482,7 @@ fn resolve_statements(
                 false_branch,
             } => {
                 let condition = resolve_expr(condition, env)?;
-                let action_name = unique_name("Condition", name_counts);
+                let action_name = unique_name(key_prefix::CONDITION, name_counts);
                 // Branches scope `let` bindings and named-scope registrations
                 // to themselves: save both, resolve each branch against them,
                 // restore after. name_counts stays shared since PA action
@@ -519,7 +520,7 @@ fn resolve_statements(
                 span,
             } => {
                 let collection = resolve_expr(collection, env)?;
-                let action_name = unique_name("Apply_to_each", name_counts);
+                let action_name = unique_name(key_prefix::APPLY_TO_EACH, name_counts);
                 // Iterator and any body-local `let` are scoped to the loop body.
                 // Same named_scopes rollback rationale as the Condition arm.
                 let saved_env = env.clone();
@@ -583,7 +584,7 @@ fn resolve_statements(
                     }
                     None => None,
                 };
-                let action_name = unique_name("Until", name_counts);
+                let action_name = unique_name(key_prefix::UNTIL, name_counts);
                 // Body scopes lets and named-scope registrations to itself,
                 // same as foreach/if-branches.
                 let saved_env = env.clone();
@@ -622,8 +623,8 @@ fn resolve_statements(
                     });
                 }
                 let base = match scope_name {
-                    Some(n) => format!("Scope_{n}"),
-                    None => "Scope".to_string(),
+                    Some(n) => format!("{}_{n}", key_prefix::SCOPE),
+                    None => key_prefix::SCOPE.to_string(),
                 };
                 let action_name = unique_name(&base, name_counts);
                 // Register named scopes so `on <status> <name>` handlers can
@@ -702,7 +703,7 @@ fn resolve_statements(
                 span,
             } => {
                 let subject = resolve_expr(subject, env)?;
-                let action_name = unique_name("Switch", name_counts);
+                let action_name = unique_name(key_prefix::SWITCH, name_counts);
                 // Cases and default each scope their `let` bindings and
                 // named-scope registrations to their own branch, like
                 // if/else-branches. Clone both before each branch and
@@ -747,7 +748,7 @@ fn resolve_statements(
                     Some(m) => Some(resolve_expr(m, env)?),
                     None => None,
                 };
-                let action_name = unique_name("Terminate", name_counts);
+                let action_name = unique_name(key_prefix::TERMINATE, name_counts);
                 (
                     action_name,
                     ActionKind::Terminate {
@@ -826,7 +827,7 @@ fn lower_assign(
     };
     match op {
         AssignOp::Set => Ok((
-            format!("Set_{name}"),
+            format!("{}_{name}", key_prefix::SET),
             ActionKind::SetVariable {
                 var: name.to_string(),
                 value,
@@ -834,14 +835,14 @@ fn lower_assign(
         )),
         AssignOp::Add => match ty {
             Type::Int | Type::Float => Ok((
-                format!("Increment_{name}"),
+                format!("{}_{name}", key_prefix::INCREMENT),
                 ActionKind::IncrementVariable {
                     var: name.to_string(),
                     value,
                 },
             )),
             Type::Array => Ok((
-                format!("Append_to_{name}"),
+                format!("{}_{name}", key_prefix::APPEND_TO),
                 ActionKind::AppendToArrayVariable {
                     var: name.to_string(),
                     value,
@@ -851,7 +852,7 @@ fn lower_assign(
         },
         AssignOp::Subtract => match ty {
             Type::Int | Type::Float => Ok((
-                format!("Decrement_{name}"),
+                format!("{}_{name}", key_prefix::DECREMENT),
                 ActionKind::DecrementVariable {
                     var: name.to_string(),
                     value,
@@ -861,7 +862,7 @@ fn lower_assign(
         },
         AssignOp::Concat => match ty {
             Type::String => Ok((
-                format!("Append_to_{name}"),
+                format!("{}_{name}", key_prefix::APPEND_TO),
                 ActionKind::AppendToStringVariable {
                     var: name.to_string(),
                     value,

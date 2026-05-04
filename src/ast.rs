@@ -205,11 +205,12 @@ pub enum HandlerStatus {
 impl HandlerStatus {
     /// PA-canonical capitalization for the runAfter status array.
     pub fn as_pa_str(self) -> &'static str {
+        use crate::pa::names::status;
         match self {
-            HandlerStatus::Succeeded => "Succeeded",
-            HandlerStatus::Failed => "Failed",
-            HandlerStatus::Skipped => "Skipped",
-            HandlerStatus::TimedOut => "TimedOut",
+            HandlerStatus::Succeeded => status::SUCCEEDED,
+            HandlerStatus::Failed => status::FAILED,
+            HandlerStatus::Skipped => status::SKIPPED,
+            HandlerStatus::TimedOut => status::TIMED_OUT,
         }
     }
 
@@ -234,10 +235,11 @@ pub enum TerminateStatus {
 impl TerminateStatus {
     /// PA's canonical capitalization for the `runStatus` field.
     pub fn as_pa_str(self) -> &'static str {
+        use crate::pa::names::status;
         match self {
-            TerminateStatus::Succeeded => "Succeeded",
-            TerminateStatus::Failed => "Failed",
-            TerminateStatus::Cancelled => "Cancelled",
+            TerminateStatus::Succeeded => status::SUCCEEDED,
+            TerminateStatus::Failed => status::FAILED,
+            TerminateStatus::Cancelled => status::CANCELLED,
         }
     }
 

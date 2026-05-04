@@ -123,47 +123,13 @@ pub fn from_interpret_error(err: &crate::interpreter::InterpretError) -> Diagnos
 pub fn from_resolve_error(err: &crate::resolver::ResolveError) -> Diagnostic {
     let diag = Diagnostic::spanned(format!("{err}"), err.span(), err.label());
     if let crate::resolver::ResolveError::UndefinedVariable { name, .. } = err
-        && is_known_function(name)
+        && crate::pa::names::is_known_function(name)
     {
         return diag.with_note(format!(
             "`{name}` is a function -- did you mean to call it? try `{name}(...)`"
         ));
     }
     diag
-}
-
-/// Whether a name matches a function paxr implements or a common PA
-/// expression function. Conservative list: add only names that are clearly
-/// function-shaped in PA land, to avoid false "did you mean" prompts on
-/// plain identifier typos. Pax type keywords (`int`, `string`, `bool`,
-/// `array`, `object`) are intentionally excluded -- they are not callable
-/// PA functions and users commonly write identifiers adjacent to those
-/// words.
-fn is_known_function(name: &str) -> bool {
-    matches!(
-        name,
-        // paxr's compiler-synthesized library (arithmetic/logic)
-        "add" | "sub" | "mul" | "div" | "mod"
-        | "min" | "max" | "range"
-        | "concat" | "equals"
-        | "less" | "lessOrEquals" | "greater" | "greaterOrEquals"
-        | "not" | "and" | "or"
-        // paxr text library
-        | "toLower" | "toUpper" | "trim" | "substring"
-        | "indexOf" | "lastIndexOf" | "startsWith" | "endsWith"
-        | "replace" | "split"
-        // paxr polymorphic + array library
-        | "length" | "empty" | "contains"
-        | "first" | "last" | "skip" | "take" | "join"
-        // paxr conversion + utility
-        | "string" | "int" | "bool" | "guid"
-        | "coalesce" | "createArray"
-        | "uriComponent" | "uriComponentToString"
-        // common PA expression functions users reach for without (...)
-        | "body" | "items" | "outputs" | "variables" | "parameters"
-        | "triggerBody" | "triggerOutputs"
-        | "utcNow" | "formatDateTime"
-    )
 }
 
 /// Humanize a chumsky Rich error as a single label string. `render_token`
@@ -321,13 +287,13 @@ mod tests {
         // so the hint is useful for them.
         for type_name in ["array", "object"] {
             assert!(
-                !is_known_function(type_name),
+                !crate::pa::names::is_known_function(type_name),
                 "non-function type keyword `{type_name}` must not trigger function hint"
             );
         }
         for fn_name in ["int", "string", "bool"] {
             assert!(
-                is_known_function(fn_name),
+                crate::pa::names::is_known_function(fn_name),
                 "function-shaped type keyword `{fn_name}` should trigger the hint"
             );
         }
