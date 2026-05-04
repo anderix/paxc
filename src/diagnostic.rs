@@ -74,11 +74,15 @@ impl Diagnostic {
 }
 
 /// Translate a chumsky byte-offset range into the char-offset range that
-/// ariadne expects. Out-of-bounds offsets are clamped to the source length
-/// so a malformed span renders defensively rather than panicking.
+/// ariadne expects. Out-of-bounds offsets are clamped to the source length;
+/// offsets that fall inside a multi-byte codepoint are snapped to the
+/// nearest valid char boundary (start down, end up) so a malformed span
+/// renders defensively rather than panicking on string slicing.
 fn bytes_to_chars(src: &str, byte_range: Range<usize>) -> Range<usize> {
-    let start_byte = byte_range.start.min(src.len());
-    let end_byte = byte_range.end.min(src.len()).max(start_byte);
+    let len = src.len();
+    let start_byte = src.floor_char_boundary(byte_range.start.min(len));
+    let end_clamped = byte_range.end.min(len).max(start_byte);
+    let end_byte = src.ceil_char_boundary(end_clamped);
     let start_char = src[..start_byte].chars().count();
     let span_chars = src[start_byte..end_byte].chars().count();
     start_char..start_char + span_chars
@@ -269,6 +273,20 @@ mod tests {
         assert_eq!(bytes_to_chars(src, 4..11), 4..9);
         // Byte range 6..8 is just the `ü`. In char land that is one char.
         assert_eq!(bytes_to_chars(src, 6..8), 6..7);
+    }
+
+    #[test]
+    fn bytes_to_chars_snaps_misaligned_offsets_to_char_boundaries() {
+        // `ü` occupies bytes 4..6 in "var ü". A span whose start lands
+        // mid-codepoint at byte 5 would panic on slice() before snapping
+        // was added. The snap rounds start down and end up so the span
+        // covers the whole `ü` codepoint.
+        let src = "var ü";
+        let translated = bytes_to_chars(src, 5..6);
+        assert_eq!(translated, 4..5);
+        // Both endpoints mid-codepoint also stay safe.
+        let translated = bytes_to_chars(src, 5..5);
+        assert_eq!(translated, 4..5);
     }
 
     #[test]

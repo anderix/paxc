@@ -1998,4 +1998,49 @@ let dec = uriComponentToString(enc)"#,
             Value::Str(s) if s == "a b&c=d"
         ));
     }
+
+    /// Defensive `err_at` paths in eval() shouldn't fire from normal source
+    /// (the resolver catches undefined refs first), but if they ever do,
+    /// the span on the resulting error should point at the originating
+    /// identifier rather than being None. Drive eval directly with a
+    /// hand-built ref to exercise each path.
+    #[test]
+    fn varref_lookup_miss_carries_originating_span() {
+        let mut interp = Interpreter::new("", Config::default());
+        let span: Span = (10..15).into();
+        let err = interp
+            .eval(&Expr::VarRef {
+                name: "ghost".to_string(),
+                span,
+            })
+            .unwrap_err();
+        assert_eq!(err.span, Some(span));
+        assert!(err.message.contains("ghost"));
+    }
+
+    #[test]
+    fn composeref_lookup_miss_carries_originating_span() {
+        let mut interp = Interpreter::new("", Config::default());
+        let span: Span = (3..9).into();
+        let err = interp
+            .eval(&Expr::ComposeRef {
+                action_name: "Compose_phantom".to_string(),
+                span,
+            })
+            .unwrap_err();
+        assert_eq!(err.span, Some(span));
+    }
+
+    #[test]
+    fn iteratorref_lookup_miss_carries_originating_span() {
+        let mut interp = Interpreter::new("", Config::default());
+        let span: Span = (0..4).into();
+        let err = interp
+            .eval(&Expr::IteratorRef {
+                action_name: "Apply_to_each_missing".to_string(),
+                span,
+            })
+            .unwrap_err();
+        assert_eq!(err.span, Some(span));
+    }
 }
