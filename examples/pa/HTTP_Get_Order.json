@@ -1,0 +1,7 @@
+{
+    "type": "Http",
+    "inputs": {
+        "method": "GET",
+        "uri": "https://api.example.com/orders/123"
+    }
+}

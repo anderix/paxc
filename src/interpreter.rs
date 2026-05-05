@@ -413,10 +413,10 @@ impl<'src> Interpreter<'src> {
                     });
                 }
             }
-            ActionKind::Raw { .. } => {
-                // Surface raw skips so the developer knows their state may
-                // diverge from the compiled flow. --debug / --quiet silence.
-                self.print_notice(&format!("<skipping raw \"{}\">", action.name));
+            ActionKind::Pa { .. } => {
+                // Opaque PA action -- paxr can't simulate connector calls,
+                // so it skips with a notice. --debug / --quiet silence.
+                self.print_notice(&format!("<skipping pa action \"{}\">", action.name));
             }
             ActionKind::Condition {
                 condition,
@@ -907,7 +907,7 @@ mod tests {
             )
             .into_result()
             .unwrap();
-        let resolved = resolver::resolve(&program).unwrap();
+        let resolved = resolver::resolve(&program, None).unwrap();
         interpret(&full, &resolved)
     }
 

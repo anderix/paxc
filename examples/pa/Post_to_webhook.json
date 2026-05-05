@@ -1,0 +1,20 @@
+{
+    "type": "Http",
+    "inputs": {
+        "method": "POST",
+        "uri": "https://example.com/hooks/daily",
+        "headers": {
+            "Content-Type": "application/json"
+        },
+        "body": {
+            "summary": "@{variables('summary')}",
+            "retries": "@{variables('retry_count')}",
+            "metadata": null
+        },
+        "retryPolicy": {
+            "type": "exponential",
+            "count": 3,
+            "interval": "PT10S"
+        }
+    }
+}

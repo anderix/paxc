@@ -7,6 +7,7 @@
 
 use chumsky::prelude::*;
 use paxc::{diagnostic, interpreter, lexer, parser, resolver};
+use std::path::Path;
 use std::{env, fs, process};
 
 fn main() {
@@ -69,7 +70,8 @@ fn main() {
         }
     };
 
-    let resolved = match resolver::resolve(&program) {
+    let source_dir = Path::new(path).parent();
+    let resolved = match resolver::resolve(&program, source_dir) {
         Ok(r) => r,
         Err(e) => {
             diagnostic::from_resolve_error(&e).report(path, &src);

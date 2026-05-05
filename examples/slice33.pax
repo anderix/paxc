@@ -1,28 +1,22 @@
-// Slice 33: `on` handlers attach to raw blocks too.
+// Slice 33: `on` handlers attach to pa actions too.
 //
 // Before: `on <status> <target>` required `<target>` to be a named scope.
-// Now: any named `raw` block is also a valid handler target, without any
-// opt-in syntax -- raw blocks always have a user-written name that
-// becomes the PA action key.
+// Now: any `pa <name>` is also a valid handler target without any opt-in
+// syntax -- pa actions always carry a user-written name that becomes the
+// PA action key.
 //
 // That closes a natural gap in the stub-and-fix workflow: the most common
-// "action that can fail" in pax is a raw connector call (HTTP, SharePoint,
-// Outlook), not a scope wrapper. Handlers can now attach directly.
+// "action that can fail" in pax is a connector call (HTTP, SharePoint,
+// Outlook), and those live in pa/<Name>.json files. Handlers attach by name.
 
 trigger manual
 
 var outcome: string = ""
 
-// Raw connector call, as you'd stub today before filling in the real
-// connector after import. The block is `raw <name> { ... }` and that
-// `<name>` is both the PA action key AND a valid handler target.
-raw HTTP_Get_Order {
-    "type": "Http",
-    "inputs": {
-        "method": "GET",
-        "uri": "https://api.example.com/orders/123"
-    }
-}
+// Opaque PA action: the body lives in pa/HTTP_Get_Order.json next to this
+// source file. paxc reads it at compile time and drops it verbatim into
+// the emitted flow.
+pa HTTP_Get_Order
 
 // Single-status handler on the raw block. Runs only if the HTTP call fails.
 on failed HTTP_Get_Order {

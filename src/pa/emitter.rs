@@ -124,7 +124,7 @@ fn emit_action(action: &ResolvedAction) -> Value {
             emit_mutation(action::APPEND_TO_ARRAY_VARIABLE, var, value)
         }
         ActionKind::Compose { value, .. } => emit_compose(value),
-        ActionKind::Raw { body } => emit_raw(body),
+        ActionKind::Pa { body_json } => body_json.clone(),
         ActionKind::Condition {
             condition,
             true_branch,
@@ -300,14 +300,6 @@ fn emit_compose(value: &Expr) -> Value {
     })
 }
 
-fn emit_raw(body: &[(String, Literal)]) -> Value {
-    let mut map = Map::new();
-    for (k, v) in body {
-        map.insert(k.clone(), literal_to_json(v));
-    }
-    Value::Object(map)
-}
-
 fn emit_mutation(action_type: &str, var: &str, value: &Expr) -> Value {
     let value_json = expr_to_json(value);
     json!({
@@ -477,7 +469,8 @@ mod tests {
             )
             .into_result()
             .expect("parse failed");
-        let resolved = resolve(&program).expect("resolve failed");
+        let fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let resolved = resolve(&program, Some(&fixtures)).expect("resolve failed");
         emit(&resolved)
     }
 
@@ -854,7 +847,7 @@ msg &= "!""#,
             )
             .into_result()
             .expect("parse failed");
-        let resolved = resolve(&program).expect("resolve failed");
+        let resolved = resolve(&program, None).expect("resolve failed");
         emit(&resolved)
     }
 
@@ -1053,16 +1046,10 @@ n = 42"#,
     }
 
     #[test]
-    fn slice33_on_handler_targets_raw_block_emits_runafter_at_raw_name() {
+    fn slice33_on_handler_targets_pa_action_emits_runafter_at_pa_name() {
         let out = compile(
             r#"var n: int = 0
-raw HTTP_Call {
-  "type": "Http",
-  "inputs": {
-    "method": "GET",
-    "uri": "https://api.example.com/data"
-  }
-}
+pa HTTP_Call
 on failed HTTP_Call {
   n = 1
 }
@@ -1075,7 +1062,7 @@ n = 99"#,
         assert_eq!(
             handler["runAfter"],
             json!({ "HTTP_Call": ["Failed"] }),
-            "handler runAfter points at the raw block's PA action name"
+            "handler runAfter points at the pa action's PA action name"
         );
         // The n = 99 after the handler must chain back to HTTP_Call, not
         // through the handler -- same off-main-chain rule as scope targets.

@@ -56,16 +56,6 @@ where
         scalar.or(array).or(object)
     });
 
-    let object_entries = {
-        let key = select! { Token::Str(s) => s };
-        let entry = key.then_ignore(just(Token::Colon)).then(literal.clone());
-        entry
-            .separated_by(just(Token::Comma))
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::LBrace), just(Token::RBrace))
-    };
-
     // Expression parsing is wrapped in `recursive` because function-call args
     // can be arbitrary expressions (including more calls), so the inner layers
     // need to reference `expr` itself.
@@ -255,12 +245,17 @@ where
             },
         );
 
-        let raw_stmt = just(Token::Raw)
-            .ignore_then(select! { Token::Ident(s) => s.to_string() })
-            .then(object_entries.clone())
-            .map_with(|(name, body), e| Stmt::Raw {
+        // `pa <Name>` -- references an opaque PA action whose body lives at
+        // `pa/<Name>.json` next to the source. The bare statement carries
+        // no body in the source itself; the resolver reads the JSON file
+        // and stores its content on the resolved action.
+        let pa_stmt = just(Token::Pa)
+            .ignore_then(
+                select! { Token::Ident(s) => s.to_string() }.map_with(|s, e| (s, e.span())),
+            )
+            .map_with(|(name, name_span), e| Stmt::Pa {
                 name,
-                body,
+                name_span,
                 span: e.span(),
             });
 
@@ -488,7 +483,7 @@ where
             .or(switch_stmt)
             .or(scope_stmt)
             .or(on_handler)
-            .or(raw_stmt)
+            .or(pa_stmt)
             .or(debug_stmt)
             .or(terminate_stmt)
             .or(assign)

@@ -1,0 +1,16 @@
+{
+  "type": "Http",
+  "inputs": {
+    "method": "POST",
+    "uri": "https://example.com/notify",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "region":  "@{outputs('Compose_region')}",
+      "label":   "@{variables('label')}",
+      "summary": "@{outputs('Compose_full_summary')}",
+      "pending": "@{variables('pending_titles')}"
+    }
+  }
+}

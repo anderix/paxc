@@ -107,7 +107,8 @@ fn main() {
         }
     };
 
-    let resolved = match resolver::resolve(&program) {
+    let source_dir = Path::new(&args.path).parent();
+    let resolved = match resolver::resolve(&program, source_dir) {
         Ok(r) => r,
         Err(e) => {
             diagnostic::from_resolve_error(&e).report(&args.path, &src);

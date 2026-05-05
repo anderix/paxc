@@ -48,21 +48,9 @@ if all_done {
 // Compose captures an object member access.
 let region = results.region
 
-// Raw JSON escape hatch for any action pax doesn't model natively.
-// PA expression strings reference variables and Compose outputs by name.
-raw Send_reminder_email {
-  "type": "Http",
-  "inputs": {
-    "method": "POST",
-    "uri": "https://example.com/notify",
-    "headers": {
-      "Content-Type": "application/json"
-    },
-    "body": {
-      "region":  "@{outputs('Compose_region')}",
-      "label":   "@{variables('label')}",
-      "summary": "@{outputs('Compose_full_summary')}",
-      "pending": "@{variables('pending_titles')}"
-    }
-  }
-}
+// Opaque PA action -- the body is whatever PA's Peek code shows for the
+// action, stored verbatim in pa/Send_reminder_email.json next to this
+// source. paxc reads the file at compile time and drops it in unchanged.
+// PA expression strings inside the JSON keep their `@{variables('X')}`
+// and `@{outputs('Y')}` references.
+pa Send_reminder_email

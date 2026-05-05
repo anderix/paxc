@@ -67,11 +67,21 @@ pub enum Stmt {
         op: AssignOp,
         value: Expr,
     },
-    Raw {
+    /// Reference to an opaque PA action defined as JSON in `pa/<name>.json`
+    /// next to the source file. paxc reads the file at compile time and
+    /// drops its contents verbatim into the emitted flow's
+    /// `definition.actions[<name>]`. The body is treated as a black box --
+    /// pax never parses or rewrites the JSON. Replaces `raw{}` from earlier
+    /// language versions; the JSON now lives next to the source instead of
+    /// inside it, which keeps connectors and other PA-specific shapes out
+    /// of pax syntax and makes round-trip from PA Peek code trivial.
+    Pa {
         name: String,
-        body: Vec<(String, Literal)>,
+        /// Span of the name identifier.
+        name_span: Span,
         /// Span of the whole statement, used for runtime-error localization
-        /// when paxr executes the resolved action.
+        /// when paxr executes the resolved action and for file-not-found
+        /// diagnostics.
         span: Span,
     },
     Let {

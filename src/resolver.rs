@@ -16,8 +16,10 @@ use crate::ast::{
 };
 use crate::lexer::Span;
 use crate::pa::names::{key_prefix, status};
+use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedProgram {
@@ -91,8 +93,12 @@ pub enum ActionKind {
         name: String,
         value: Expr,
     },
-    Raw {
-        body: Vec<(String, Literal)>,
+    /// Opaque PA action whose body was loaded from `pa/<name>.json` next
+    /// to the source. The emitter drops the JSON verbatim under the
+    /// action's key. The resolver reads the file at compile time so any
+    /// missing-file or malformed-JSON failure surfaces with a span.
+    Pa {
+        body_json: JsonValue,
     },
     Condition {
         condition: Expr,
@@ -242,13 +248,34 @@ pub enum ResolveError {
         value: i64,
         span: Span,
     },
-    /// A `scope <name>` or `raw <name>` block declared a name that was
+    /// A `scope <name>` or `pa <name>` block declared a name that was
     /// already registered as a handler target earlier in the program. The
     /// previous declaration would silently be shadowed in the registry,
     /// which would misroute any later `on <status> <name>` handler.
     /// Both kinds share one namespace.
     DuplicateHandlerTarget {
         name: String,
+        span: Span,
+    },
+    /// `pa <name>` was used but the resolver wasn't given a source
+    /// directory to look up `pa/<name>.json` against. Caller must invoke
+    /// `resolve` with `Some(source_dir)` for any program containing pa
+    /// references.
+    PaSourceDirRequired {
+        name: String,
+        span: Span,
+    },
+    /// `pa <name>` referenced a JSON file that doesn't exist on disk.
+    PaFileNotFound {
+        name: String,
+        path: PathBuf,
+        span: Span,
+    },
+    /// `pa <name>` found the file but its contents are not valid JSON.
+    PaFileInvalidJson {
+        name: String,
+        path: PathBuf,
+        message: String,
         span: Span,
     },
 }
@@ -264,7 +291,10 @@ impl ResolveError {
             | ResolveError::UnknownHandlerTarget { span, .. }
             | ResolveError::DuplicateHandlerStatus { span, .. }
             | ResolveError::InvalidUntilLimit { span, .. }
-            | ResolveError::DuplicateHandlerTarget { span, .. } => *span,
+            | ResolveError::DuplicateHandlerTarget { span, .. }
+            | ResolveError::PaSourceDirRequired { span, .. }
+            | ResolveError::PaFileNotFound { span, .. }
+            | ResolveError::PaFileInvalidJson { span, .. } => *span,
         }
     }
 
@@ -276,10 +306,13 @@ impl ResolveError {
             ResolveError::InvalidOperation { .. } => "invalid operation",
             ResolveError::CannotAssignToImmutable { .. } => "immutable binding",
             ResolveError::NestedVarDeclaration { .. } => "must be top-level",
-            ResolveError::UnknownHandlerTarget { .. } => "not a named scope or raw block",
+            ResolveError::UnknownHandlerTarget { .. } => "not a named scope or pa action",
             ResolveError::DuplicateHandlerStatus { .. } => "duplicate status",
             ResolveError::InvalidUntilLimit { .. } => "invalid until limit",
             ResolveError::DuplicateHandlerTarget { .. } => "name already used",
+            ResolveError::PaSourceDirRequired { .. } => "no source directory",
+            ResolveError::PaFileNotFound { .. } => "file not found",
+            ResolveError::PaFileInvalidJson { .. } => "invalid JSON",
         }
     }
 }
@@ -318,7 +351,7 @@ impl fmt::Display for ResolveError {
             ResolveError::UnknownHandlerTarget { name, .. } => {
                 write!(
                     f,
-                    "`{name}` is not a named scope or raw block; `on` handlers attach to `scope <name> {{ ... }}` or `raw <name> {{ ... }}`"
+                    "`{name}` is not a named scope or pa action; `on` handlers attach to `scope <name> {{ ... }}` or `pa <name>`"
                 )
             }
             ResolveError::DuplicateHandlerStatus { status, .. } => {
@@ -337,7 +370,32 @@ impl fmt::Display for ResolveError {
             ResolveError::DuplicateHandlerTarget { name, .. } => {
                 write!(
                     f,
-                    "`{name}` is already used as a scope or raw block name earlier in the program; `on` handlers attach by name, so each handler target must be unique"
+                    "`{name}` is already used as a scope or pa action name earlier in the program; `on` handlers attach by name, so each handler target must be unique"
+                )
+            }
+            ResolveError::PaSourceDirRequired { name, .. } => {
+                write!(
+                    f,
+                    "`pa {name}` requires a source directory but none was provided to the resolver"
+                )
+            }
+            ResolveError::PaFileNotFound { name, path, .. } => {
+                write!(
+                    f,
+                    "`pa {name}` references `{}` but that file was not found",
+                    path.display()
+                )
+            }
+            ResolveError::PaFileInvalidJson {
+                name,
+                path,
+                message,
+                ..
+            } => {
+                write!(
+                    f,
+                    "`pa {name}`: `{}` is not valid JSON: {message}",
+                    path.display()
                 )
             }
         }
@@ -357,14 +415,22 @@ fn type_name(ty: &Type) -> &'static str {
     }
 }
 
-pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
+/// Resolve a parsed program into a flow-shaped action sequence. `source_dir`
+/// is the directory of the input `.pax` file -- it's used to resolve
+/// `pa <Name>` references against `<source_dir>/pa/<Name>.json`. Tests that
+/// build `Program` ASTs by hand without any pa references can pass `None`;
+/// any pa reference in such a program produces `PaSourceDirRequired`.
+pub fn resolve(
+    program: &Program,
+    source_dir: Option<&Path>,
+) -> Result<ResolvedProgram, ResolveError> {
     let mut env: HashMap<String, Binding> = HashMap::new();
     let mut name_counts: HashMap<String, u32> = HashMap::new();
     // Source name -> PA action name for every user-labeled handler target
-    // (named scopes and raw blocks today). Populated as we resolve each
-    // `scope <name>` and `raw <name>` block; consumed when an `on` handler
+    // (named scopes and pa actions). Populated as we resolve each
+    // `scope <name>` and `pa <name>`; consumed when an `on` handler
     // references a target by name. Variable name is historical -- the
-    // registry covers both scopes and raw blocks now. This map ROLLS BACK
+    // registry covers both scopes and pa actions now. This map ROLLS BACK
     // at block exit, so handler resolution only sees targets visible at
     // the handler's declaration point -- a scope inside an if-branch is
     // not a visible handler target once the branch ends.
@@ -373,7 +439,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
     // nesting. Does NOT roll back at block exit. Used solely for duplicate
     // detection so that `scope foo` inside an if-branch followed by
     // `scope foo` at sibling or outer level is rejected. Both kinds of
-    // block (scope / raw) share this namespace; PA would otherwise end up
+    // block (scope / pa) share this namespace; PA would otherwise end up
     // with two identically-labeled actions in the compiled flow.
     let mut declared_targets: HashSet<String> = HashSet::new();
     let actions = resolve_statements(
@@ -382,6 +448,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         &mut name_counts,
         &mut named_scopes,
         &mut declared_targets,
+        source_dir,
         true,
     )?;
     Ok(ResolvedProgram {
@@ -392,13 +459,14 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
 
 /// `top_level` controls whether `var` declarations are permitted. PA requires
 /// `InitializeVariable` actions at workflow scope, so nested `var` decls must
-/// be rejected at compile time. `let` / assign / raw are fine at any depth.
+/// be rejected at compile time. `let` / assign / pa are fine at any depth.
 fn resolve_statements(
     statements: &[Stmt],
     env: &mut HashMap<String, Binding>,
     name_counts: &mut HashMap<String, u32>,
     named_scopes: &mut HashMap<String, String>,
     declared_targets: &mut HashSet<String>,
+    source_dir: Option<&Path>,
     top_level: bool,
 ) -> Result<Vec<ResolvedAction>, ResolveError> {
     let mut actions: Vec<ResolvedAction> = Vec::with_capacity(statements.len());
@@ -491,30 +559,49 @@ fn resolve_statements(
                     }
                 }
             }
-            Stmt::Raw { name, body, span } => {
+            Stmt::Pa {
+                name,
+                name_span: _,
+                span,
+            } => {
                 // Enforce uniqueness across every handler target ever
-                // declared in the program. Scopes and raw blocks share one
-                // namespace; duplicates would produce two identically-
-                // labeled actions in the compiled flow and misroute any
-                // later `on <status> <name>` handler. Uses the permanent
-                // `declared_targets` set rather than the rollback-able
-                // `named_scopes` map so that a nested duplicate followed by
-                // an outer sibling is caught (e.g. `scope foo` inside an
-                // if-branch, then `scope foo` at workflow level).
+                // declared in the program. Scopes and pa actions share
+                // one namespace; duplicates would produce two
+                // identically-labeled actions in the compiled flow and
+                // misroute any later `on <status> <name>` handler.
                 if !declared_targets.insert(name.clone()) {
                     return Err(ResolveError::DuplicateHandlerTarget {
                         name: name.clone(),
                         span: *span,
                     });
                 }
+                // Read the opaque JSON body from `<source_dir>/pa/<name>.json`.
+                let Some(dir) = source_dir else {
+                    return Err(ResolveError::PaSourceDirRequired {
+                        name: name.clone(),
+                        span: *span,
+                    });
+                };
+                let path = dir.join("pa").join(format!("{name}.json"));
+                let bytes = std::fs::read(&path).map_err(|_| ResolveError::PaFileNotFound {
+                    name: name.clone(),
+                    path: path.clone(),
+                    span: *span,
+                })?;
+                let body_json: JsonValue = serde_json::from_slice(&bytes).map_err(|err| {
+                    ResolveError::PaFileInvalidJson {
+                        name: name.clone(),
+                        path: path.clone(),
+                        message: err.to_string(),
+                        span: *span,
+                    }
+                })?;
+                // The user-written name is the PA action key verbatim; pa
+                // actions always have a name and so are valid handler
+                // targets without opt-in syntax.
                 let action_name = unique_name(name, name_counts);
-                // Register raw blocks in the handler-target registry so
-                // `on <status> <name>` handlers can attach to them. Raw
-                // blocks always have a user-written name (it becomes the
-                // PA action key verbatim), so this makes every raw block
-                // a valid handler target by default -- no opt-in syntax.
                 named_scopes.insert(name.clone(), action_name.clone());
-                (action_name, ActionKind::Raw { body: body.clone() }, *span)
+                (action_name, ActionKind::Pa { body_json }, *span)
             }
             Stmt::If {
                 condition,
@@ -541,6 +628,7 @@ fn resolve_statements(
                     name_counts,
                     named_scopes,
                     declared_targets,
+                    source_dir,
                     false,
                 )?;
                 *env = saved_env.clone();
@@ -551,6 +639,7 @@ fn resolve_statements(
                     name_counts,
                     named_scopes,
                     declared_targets,
+                    source_dir,
                     false,
                 )?;
                 *env = saved_env;
@@ -590,6 +679,7 @@ fn resolve_statements(
                     name_counts,
                     named_scopes,
                     declared_targets,
+                    source_dir,
                     false,
                 )?;
                 *env = saved_env;
@@ -657,6 +747,7 @@ fn resolve_statements(
                     name_counts,
                     named_scopes,
                     declared_targets,
+                    source_dir,
                     false,
                 )?;
                 *env = saved_env;
@@ -714,6 +805,7 @@ fn resolve_statements(
                     name_counts,
                     named_scopes,
                     declared_targets,
+                    source_dir,
                     false,
                 )?;
                 *env = saved_env;
@@ -763,6 +855,7 @@ fn resolve_statements(
                     name_counts,
                     named_scopes,
                     declared_targets,
+                    source_dir,
                     false,
                 )?;
                 *env = saved_env;
@@ -803,6 +896,7 @@ fn resolve_statements(
                         name_counts,
                         named_scopes,
                         declared_targets,
+                        source_dir,
                         false,
                     )?;
                     resolved_cases.push(ResolvedSwitchCase {
@@ -821,6 +915,7 @@ fn resolve_statements(
                             name_counts,
                             named_scopes,
                             declared_targets,
+                            source_dir,
                             false,
                         )?)
                     }
@@ -1069,11 +1164,19 @@ mod tests {
             )
             .into_result()
             .expect("parse failed");
-        resolve(&program)
+        resolve(&program, None)
     }
 
     fn sp() -> Span {
         (0..0).into()
+    }
+
+    /// Path to the in-repo fixtures directory used by tests that exercise
+    /// the `pa <Name>` resolver path (which reads `pa/<Name>.json` from
+    /// the source dir). Each fixture file is a minimal valid JSON object
+    /// so the tests can focus on resolver logic, not body content.
+    fn fixtures() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
     }
 
     fn rref(name: &str) -> Expr {
@@ -1138,7 +1241,7 @@ mod tests {
             trigger: Trigger::Manual,
             statements: vec![var("a"), debug(vec![]), var("b")],
         };
-        let resolved = resolve(&prog).expect("resolve should succeed");
+        let resolved = resolve(&prog, None).expect("resolve should succeed");
         assert_eq!(resolved.actions.len(), 3);
         assert_eq!(resolved.actions[0].name, "Initialize_a");
         assert!(matches!(resolved.actions[1].kind, ActionKind::Debug { .. }));
@@ -1162,7 +1265,7 @@ mod tests {
             trigger: Trigger::Manual,
             statements: vec![var("a"), var("b"), var("c")],
         };
-        let resolved = resolve(&prog).expect("resolve should succeed");
+        let resolved = resolve(&prog, None).expect("resolve should succeed");
         assert_eq!(resolved.actions.len(), 3);
         assert_eq!(resolved.actions[0].name, "Initialize_a");
         assert!(resolved.actions[0].run_after.is_empty());
@@ -1179,7 +1282,7 @@ mod tests {
             statements: vec![var("x"), var("x")],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::DuplicateVariable { name, .. } if name == "x"
         ));
     }
@@ -1196,7 +1299,7 @@ mod tests {
             trigger: Trigger::Manual,
             statements: vec![var("x"), ref_y],
         };
-        assert!(resolve(&prog).is_ok());
+        assert!(resolve(&prog, None).is_ok());
     }
 
     #[test]
@@ -1212,7 +1315,7 @@ mod tests {
             statements: vec![ref_y],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::UndefinedVariable { name, .. } if name == "nope"
         ));
     }
@@ -1230,7 +1333,7 @@ mod tests {
             statements: vec![ref_y, var("x")],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::UndefinedVariable { name, .. } if name == "x"
         ));
     }
@@ -1244,7 +1347,7 @@ mod tests {
                 assign("x", AssignOp::Set, Expr::Literal(Literal::Bool(true))),
             ],
         };
-        let resolved = resolve(&prog).unwrap();
+        let resolved = resolve(&prog, None).unwrap();
         assert!(matches!(
             resolved.actions[1].kind,
             ActionKind::SetVariable { .. }
@@ -1267,7 +1370,7 @@ mod tests {
                     assign("x", AssignOp::Add, Expr::Literal(Literal::Int(1))),
                 ],
             };
-            let resolved = resolve(&prog).unwrap();
+            let resolved = resolve(&prog, None).unwrap();
             assert_eq!(resolved.actions[1].name, expected_name);
         }
     }
@@ -1283,7 +1386,7 @@ mod tests {
                 ],
             };
             assert!(matches!(
-                resolve(&prog).unwrap_err(),
+                resolve(&prog, None).unwrap_err(),
                 ResolveError::InvalidOperation { .. }
             ));
         }
@@ -1302,7 +1405,7 @@ mod tests {
                 ),
             ],
         };
-        let resolved = resolve(&prog).unwrap();
+        let resolved = resolve(&prog, None).unwrap();
         assert_eq!(resolved.actions[1].name, "Append_to_msg");
         assert!(matches!(
             resolved.actions[1].kind,
@@ -1331,7 +1434,7 @@ mod tests {
                 ],
             };
             assert!(matches!(
-                resolve(&prog).unwrap_err(),
+                resolve(&prog, None).unwrap_err(),
                 ResolveError::InvalidOperation { .. }
             ));
         }
@@ -1348,7 +1451,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::InvalidOperation { .. }
         ));
         for ty in [Type::Int, Type::Float] {
@@ -1359,7 +1462,7 @@ mod tests {
                     assign("x", AssignOp::Subtract, Expr::Literal(Literal::Int(1))),
                 ],
             };
-            let resolved = resolve(&prog).unwrap();
+            let resolved = resolve(&prog, None).unwrap();
             assert_eq!(resolved.actions[1].name, "Decrement_x");
         }
     }
@@ -1375,7 +1478,7 @@ mod tests {
             )],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::UndefinedVariable { name, .. } if name == "nope"
         ));
     }
@@ -1391,7 +1494,7 @@ mod tests {
                 assign("x", AssignOp::Add, Expr::Literal(Literal::Int(1))),
             ],
         };
-        let resolved = resolve(&prog).unwrap();
+        let resolved = resolve(&prog, None).unwrap();
         assert_eq!(resolved.actions[1].name, "Increment_x");
         assert_eq!(resolved.actions[2].name, "Increment_x_1");
         assert_eq!(resolved.actions[3].name, "Increment_x_2");
@@ -1403,7 +1506,7 @@ mod tests {
             trigger: Trigger::Manual,
             statements: vec![let_stmt("doubled", Expr::Literal(Literal::Int(42)))],
         };
-        let resolved = resolve(&prog).unwrap();
+        let resolved = resolve(&prog, None).unwrap();
         assert_eq!(resolved.actions[0].name, "Compose_doubled");
         assert!(matches!(
             resolved.actions[0].kind,
@@ -1425,7 +1528,7 @@ mod tests {
                 },
             ],
         };
-        let resolved = resolve(&prog).unwrap();
+        let resolved = resolve(&prog, None).unwrap();
         let var_action = &resolved.actions[1];
         match &var_action.kind {
             ActionKind::InitializeVariable { value, .. } => {
@@ -1447,7 +1550,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::CannotAssignToImmutable { name, .. } if name == "immut"
         ));
     }
@@ -1467,7 +1570,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::NestedVarDeclaration { name, .. } if name == "inner"
         ));
     }
@@ -1487,7 +1590,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::NestedVarDeclaration { name, .. } if name == "inner"
         ));
     }
@@ -1510,7 +1613,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::UndefinedVariable { name, .. } if name == "inner"
         ));
     }
@@ -1530,7 +1633,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::UndefinedVariable { name, .. } if name == "inner"
         ));
     }
@@ -1551,7 +1654,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::UndefinedVariable { name, .. } if name == "per_item"
         ));
     }
@@ -1572,7 +1675,7 @@ mod tests {
                 },
             ],
         };
-        assert!(resolve(&prog).is_ok());
+        assert!(resolve(&prog, None).is_ok());
     }
 
     #[test]
@@ -1594,7 +1697,7 @@ mod tests {
                 },
             ],
         };
-        let resolved = resolve(&prog).unwrap();
+        let resolved = resolve(&prog, None).unwrap();
         assert_eq!(resolved.actions[0].name, "Scope_try_work");
         assert_eq!(resolved.actions[1].name, "On_failed_try_work");
         match &resolved.actions[1].kind {
@@ -1633,7 +1736,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::UnknownHandlerTarget { name, .. } if name == "nope"
         ));
     }
@@ -1669,7 +1772,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::UnknownHandlerTarget { name, .. } if name == "conditional_work"
         ));
     }
@@ -1702,7 +1805,7 @@ mod tests {
             }],
         };
         assert!(
-            resolve(&prog).is_ok(),
+            resolve(&prog, None).is_ok(),
             "handler on sibling inner scope should resolve"
         );
     }
@@ -1730,7 +1833,7 @@ mod tests {
                 var("after"),
             ],
         };
-        let resolved = resolve(&prog).unwrap();
+        let resolved = resolve(&prog, None).unwrap();
         assert_eq!(resolved.actions[2].name, "Initialize_after");
         assert_eq!(resolved.actions[2].run_after.len(), 1);
         assert_eq!(
@@ -1758,7 +1861,7 @@ mod tests {
                 },
             ],
         };
-        let resolved = resolve(&prog).unwrap();
+        let resolved = resolve(&prog, None).unwrap();
         assert_eq!(
             resolved.actions[1].name, "On_failed_timedout_try_work",
             "action name joins status labels in source order"
@@ -1799,37 +1902,37 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::DuplicateHandlerTarget { name, .. } if name == "work"
         ));
     }
 
     #[test]
-    fn slice35_duplicate_raw_name_is_resolve_error() {
+    fn slice35_duplicate_pa_name_is_resolve_error() {
         let prog = Program {
             trigger: Trigger::Manual,
             statements: vec![
-                Stmt::Raw {
+                Stmt::Pa {
                     name: "HTTP_Call".to_string(),
-                    body: vec![],
+                    name_span: sp(),
                     span: sp(),
                 },
-                Stmt::Raw {
+                Stmt::Pa {
                     name: "HTTP_Call".to_string(),
-                    body: vec![],
+                    name_span: sp(),
                     span: sp(),
                 },
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, Some(&fixtures())).unwrap_err(),
             ResolveError::DuplicateHandlerTarget { name, .. } if name == "HTTP_Call"
         ));
     }
 
     #[test]
-    fn slice35_scope_and_raw_share_namespace() {
-        // `scope foo` followed by `raw foo` also collides -- both are
+    fn slice35_scope_and_pa_share_namespace() {
+        // `scope foo` followed by `pa foo` also collides -- both are
         // handler targets and share one name registry.
         let prog = Program {
             trigger: Trigger::Manual,
@@ -1839,15 +1942,15 @@ mod tests {
                     body: vec![],
                     span: sp(),
                 },
-                Stmt::Raw {
+                Stmt::Pa {
                     name: "foo".to_string(),
-                    body: vec![],
+                    name_span: sp(),
                     span: sp(),
                 },
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, Some(&fixtures())).unwrap_err(),
             ResolveError::DuplicateHandlerTarget { name, .. } if name == "foo"
         ));
     }
@@ -1871,7 +1974,7 @@ mod tests {
                 },
             ],
         };
-        assert!(resolve(&prog).is_ok());
+        assert!(resolve(&prog, None).is_ok());
     }
 
     #[test]
@@ -1902,7 +2005,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::DuplicateHandlerTarget { name, .. } if name == "path"
         ));
     }
@@ -1936,7 +2039,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::DuplicateHandlerTarget { name, .. } if name == "foo"
         ));
     }
@@ -1956,7 +2059,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::InvalidUntilLimit { value: 0, .. }
         ));
     }
@@ -1993,19 +2096,19 @@ mod tests {
             }],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::InvalidUntilLimit { value: -5, .. }
         ));
     }
 
     #[test]
-    fn slice33_on_handler_targets_a_raw_block() {
+    fn slice33_on_handler_targets_a_pa_action() {
         let prog = Program {
             trigger: Trigger::Manual,
             statements: vec![
-                Stmt::Raw {
+                Stmt::Pa {
                     name: "HTTP_Call".to_string(),
-                    body: vec![],
+                    name_span: sp(),
                     span: sp(),
                 },
                 Stmt::OnHandler {
@@ -2017,7 +2120,7 @@ mod tests {
                 },
             ],
         };
-        let resolved = resolve(&prog).unwrap();
+        let resolved = resolve(&prog, Some(&fixtures())).unwrap();
         assert_eq!(resolved.actions[0].name, "HTTP_Call");
         assert_eq!(resolved.actions[1].name, "On_failed_HTTP_Call");
         match &resolved.actions[1].kind {
@@ -2030,12 +2133,12 @@ mod tests {
         }
         assert_eq!(
             resolved.actions[1].run_after[0].action_name, "HTTP_Call",
-            "runAfter points at the raw block by its PA action name"
+            "runAfter points at the pa action by its PA action name"
         );
     }
 
     #[test]
-    fn slice33_unknown_handler_target_error_mentions_raw_too() {
+    fn slice33_unknown_handler_target_error_mentions_pa_too() {
         let prog = Program {
             trigger: Trigger::Manual,
             statements: vec![Stmt::OnHandler {
@@ -2046,11 +2149,11 @@ mod tests {
                 span: sp(),
             }],
         };
-        let err = resolve(&prog).unwrap_err();
+        let err = resolve(&prog, None).unwrap_err();
         let msg = format!("{err}");
         assert!(
-            msg.contains("raw"),
-            "error message should mention raw blocks: {msg}"
+            msg.contains("pa"),
+            "error message should mention pa actions: {msg}"
         );
     }
 
@@ -2074,7 +2177,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::DuplicateHandlerStatus { status, .. }
                 if status == HandlerStatus::Failed
         ));
@@ -2090,7 +2193,7 @@ mod tests {
                 span: sp(),
             }],
         };
-        let resolved = resolve(&prog).unwrap();
+        let resolved = resolve(&prog, None).unwrap();
         assert_eq!(resolved.actions[0].name, "Scope");
         assert!(matches!(resolved.actions[0].kind, ActionKind::Scope { .. }));
     }
@@ -2105,7 +2208,7 @@ mod tests {
                 span: sp(),
             }],
         };
-        let resolved = resolve(&prog).unwrap();
+        let resolved = resolve(&prog, None).unwrap();
         assert_eq!(resolved.actions[0].name, "Scope_try_api");
     }
 
@@ -2121,7 +2224,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::NestedVarDeclaration { name, .. } if name == "inner"
         ));
     }
@@ -2140,7 +2243,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::UndefinedVariable { name, .. } if name == "inner"
         ));
     }
@@ -2173,7 +2276,7 @@ mod tests {
                 },
             ],
         };
-        let resolved = resolve(&prog).unwrap();
+        let resolved = resolve(&prog, None).unwrap();
         match &resolved.actions[1].kind {
             ActionKind::Switch { cases, default, .. } => {
                 assert_eq!(cases[0].action_name, "Case");
@@ -2205,7 +2308,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::NestedVarDeclaration { name, .. } if name == "inner"
         ));
     }
@@ -2233,7 +2336,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::UndefinedVariable { name, .. } if name == "inner"
         ));
     }
@@ -2245,7 +2348,7 @@ mod tests {
             statements: vec![var("x"), let_stmt("x", Expr::Literal(Literal::Int(1)))],
         };
         assert!(matches!(
-            resolve(&prog).unwrap_err(),
+            resolve(&prog, None).unwrap_err(),
             ResolveError::DuplicateVariable { name, .. } if name == "x"
         ));
     }
