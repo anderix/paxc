@@ -714,17 +714,24 @@ fn render_operator(name: &str, args: &[PaExpr], ctx: &RenderCtx<'_>) -> Option<S
 
     // and(a, b, ...) → (a && b && ...) — variadic.
     // or(a, b, ...) → (a || b || ...).
+    // Single-argument `and([x])` / `or([x])` collapses to just the inner
+    // expression. PA's designer often wraps a lone condition in
+    // `{"and":[<one>]}` boilerplate; without this, the round-trip emits a
+    // redundant `and((x == y))` for what's really just `x == y`.
     let logical_op = match name {
         "and" => Some("&&"),
         "or" => Some("||"),
         _ => None,
     };
-    if let Some(op) = logical_op
-        && args.len() >= 2
-    {
-        let parts: Option<Vec<String>> = args.iter().map(|a| render_expr(a, ctx)).collect();
-        let parts = parts?;
-        return Some(format!("({})", parts.join(&format!(" {op} "))));
+    if let Some(op) = logical_op {
+        if args.len() == 1 {
+            return render_expr(&args[0], ctx);
+        }
+        if args.len() >= 2 {
+            let parts: Option<Vec<String>> = args.iter().map(|a| render_expr(a, ctx)).collect();
+            let parts = parts?;
+            return Some(format!("({})", parts.join(&format!(" {op} "))));
+        }
     }
 
     None
@@ -1491,18 +1498,26 @@ mod tests {
 
     #[test]
     fn condition_object_and_equals_to_pax_chain() {
-        // PA designer's `if approved == true`:
+        // PA designer's `if approved == true` writes a single-condition
         //   {"and":[{"equals":["@variables('approved')", true]}]}
-        // The `and([equals(...)])` round-trips back to paxc's emitter as
-        // `and(equals(...))` which the optimizer treats correctly. We render
-        // the literal object form to its semantic equivalent.
+        // even though there's only one operand. Single-argument `and` /
+        // `or` collapses to just the inner condition so the round-trip
+        // doesn't emit a redundant `and(...)` wrap.
         let v = serde_json::json!({
             "and": [{ "equals": ["@variables('approved')", true] }]
         });
         let out = cond(v, &["approved"]);
-        // Single-arg `and` doesn't get the && operator (we require ≥2);
-        // the generic-call path emits `and((approved == true))`.
-        assert_eq!(out.as_deref(), Some("and((approved == true))"));
+        assert_eq!(out.as_deref(), Some("(approved == true)"));
+    }
+
+    #[test]
+    fn condition_object_single_or_collapses_to_inner() {
+        // Same collapse for `or` with one arg.
+        let v = serde_json::json!({
+            "or": [{ "equals": ["@variables('approved')", true] }]
+        });
+        let out = cond(v, &["approved"]);
+        assert_eq!(out.as_deref(), Some("(approved == true)"));
     }
 
     #[test]

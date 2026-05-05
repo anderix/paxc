@@ -206,8 +206,10 @@ fn fix_manual_trigger_inputs(triggers: &mut Value) {
 
 /// PA's designer exports variable types in lowercase (`integer`, `string`,
 /// etc.). paxc's emitter uses the canonical Logic Apps capitalization. Both
-/// forms probably work, but we match PA for safety. Recurses into the
-/// `actions` subtrees of `Foreach` and `If` bodies.
+/// forms probably work, but we match PA for safety. Recurses through the
+/// same container set as `fix_connector_inputs` (Foreach, Scope, Until,
+/// If/else, Switch cases + default) so a `var` declared inside any of them
+/// gets the same normalization as one at the top level.
 fn lowercase_var_types(actions: &mut Value) {
     let Some(obj) = actions.as_object_mut() else {
         return;
@@ -237,7 +239,7 @@ fn lowercase_var_types(actions: &mut Value) {
                     }
                 }
             }
-            "Foreach" => {
+            "Foreach" | "Scope" | "Until" => {
                 if let Some(nested) = a.get_mut("actions") {
                     lowercase_var_types(nested);
                 }
@@ -248,6 +250,18 @@ fn lowercase_var_types(actions: &mut Value) {
                 }
                 if let Some(else_obj) = a.get_mut("else").and_then(|e| e.get_mut("actions")) {
                     lowercase_var_types(else_obj);
+                }
+            }
+            "Switch" => {
+                if let Some(cases) = a.get_mut("cases").and_then(|v| v.as_object_mut()) {
+                    for (_, case) in cases.iter_mut() {
+                        if let Some(nested) = case.get_mut("actions") {
+                            lowercase_var_types(nested);
+                        }
+                    }
+                }
+                if let Some(default) = a.get_mut("default").and_then(|d| d.get_mut("actions")) {
+                    lowercase_var_types(default);
                 }
             }
             _ => {}
@@ -534,6 +548,72 @@ mod tests {
     use super::*;
 
     #[test]
+    fn lowercase_var_types_recurses_into_scope_until_switch() {
+        // var declared inside a Scope, Until, or Switch case body must get
+        // its type lowercased like one at the workflow root would.
+        let mut actions = json!({
+            "Scope_outer": {
+                "type": "Scope",
+                "actions": {
+                    "Initialize_a": {
+                        "type": "InitializeVariable",
+                        "inputs": { "variables": [{"name": "a", "type": "Integer"}] }
+                    }
+                }
+            },
+            "Until_loop": {
+                "type": "Until",
+                "actions": {
+                    "Initialize_b": {
+                        "type": "InitializeVariable",
+                        "inputs": { "variables": [{"name": "b", "type": "String"}] }
+                    }
+                }
+            },
+            "Switch_route": {
+                "type": "Switch",
+                "cases": {
+                    "c1": {
+                        "actions": {
+                            "Initialize_c": {
+                                "type": "InitializeVariable",
+                                "inputs": { "variables": [{"name": "c", "type": "Boolean"}] }
+                            }
+                        }
+                    }
+                },
+                "default": {
+                    "actions": {
+                        "Initialize_d": {
+                            "type": "InitializeVariable",
+                            "inputs": { "variables": [{"name": "d", "type": "Array"}] }
+                        }
+                    }
+                }
+            }
+        });
+        lowercase_var_types(&mut actions);
+        assert_eq!(
+            actions["Scope_outer"]["actions"]["Initialize_a"]["inputs"]["variables"][0]["type"],
+            "integer"
+        );
+        assert_eq!(
+            actions["Until_loop"]["actions"]["Initialize_b"]["inputs"]["variables"][0]["type"],
+            "string"
+        );
+        assert_eq!(
+            actions["Switch_route"]["cases"]["c1"]["actions"]["Initialize_c"]["inputs"]["variables"]
+                [0]["type"],
+            "boolean"
+        );
+        assert_eq!(
+            actions["Switch_route"]["default"]["actions"]["Initialize_d"]["inputs"]["variables"][0]
+                ["type"],
+            "array"
+        );
+    }
+
+    #[test]
     fn fix_connector_inputs_removes_authentication_field() {
         let mut actions = json!({
             "Get_items": {
@@ -619,6 +699,65 @@ mod tests {
             ["inputs"];
         assert!(inner.get("authentication").is_none());
         assert!(else_call.get("authentication").is_none());
+    }
+
+    #[test]
+    fn fix_connector_inputs_recurses_through_switch_and_until() {
+        // Switch cases, Switch default, and Until bodies are part of the
+        // container set fix_connector_inputs handles. A connector buried in
+        // any of them must still get its authentication stripped and host
+        // fields normalized.
+        let mut actions = json!({
+            "Switch_route": {
+                "type": "Switch",
+                "cases": {
+                    "case1": {
+                        "actions": {
+                            "Case_call": {
+                                "type": "OpenApiConnection",
+                                "inputs": {
+                                    "host": { "connectionName": "case_conn" },
+                                    "authentication": "@parameters('$authentication')"
+                                }
+                            }
+                        }
+                    }
+                },
+                "default": {
+                    "actions": {
+                        "Default_call": {
+                            "type": "OpenApiConnection",
+                            "inputs": {
+                                "host": { "connectionName": "default_conn" },
+                                "authentication": "@parameters('$authentication')"
+                            }
+                        }
+                    }
+                }
+            },
+            "Until_loop": {
+                "type": "Until",
+                "actions": {
+                    "Until_call": {
+                        "type": "OpenApiConnectionWebhook",
+                        "inputs": {
+                            "host": { "connectionName": "until_conn" },
+                            "authentication": "@parameters('$authentication')"
+                        }
+                    }
+                }
+            }
+        });
+        fix_connector_inputs(&mut actions);
+        let case_call =
+            &actions["Switch_route"]["cases"]["case1"]["actions"]["Case_call"]["inputs"];
+        let default_call = &actions["Switch_route"]["default"]["actions"]["Default_call"]["inputs"];
+        let until_call = &actions["Until_loop"]["actions"]["Until_call"]["inputs"];
+        for inp in [case_call, default_call, until_call] {
+            assert!(inp.get("authentication").is_none());
+            assert!(inp["host"].get("connectionName").is_some());
+            assert!(inp["host"].get("connectionReferenceName").is_some());
+        }
     }
 
     #[test]

@@ -2469,7 +2469,7 @@ mod tests {
         let pax = read(&report.pax_path);
         assert!(pax.contains("var approved: bool = false"), "pax was: {pax}");
         assert!(
-            pax.contains("if and((approved == true)) {"),
+            pax.contains("if (approved == true) {"),
             "expected natively-decoded If header; pax was: {pax}"
         );
         // No pa/If_check.json because the If decoded natively.
