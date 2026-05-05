@@ -29,8 +29,9 @@ pub mod action {
     // Compute / data.
     pub const COMPOSE: &str = "Compose";
 
-    // Control flow. Note: the action TYPE is `Foreach`, while the default
-    // action KEY is `Apply_to_each` (see `key_prefix::APPLY_TO_EACH`).
+    // Control flow. Foreach action keys derive from the iterator name in
+    // source (`foreach thingy in xs` → action key `thingy`); see the
+    // resolver's `Stmt::Foreach` arm.
     pub const IF: &str = "If";
     pub const SWITCH: &str = "Switch";
     pub const SCOPE: &str = "Scope";
@@ -58,7 +59,6 @@ pub mod key_prefix {
     pub const APPEND_TO: &str = "Append_to";
     pub const COMPOSE: &str = "Compose";
     pub const SCOPE: &str = "Scope";
-    pub const APPLY_TO_EACH: &str = "Apply_to_each";
     pub const UNTIL: &str = "Until";
     pub const SWITCH: &str = "Switch";
     pub const TERMINATE: &str = "Terminate";

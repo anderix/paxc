@@ -1030,14 +1030,14 @@ mod tests {
     #[test]
     fn slice45a_iteration_indexes_returns_active_loop_index() {
         // Inside a foreach, iterationIndexes('<actionKey>') returns 0..n-1
-        // for each iteration. The action key for an unnamed foreach is the
-        // PA-canonical `Apply_to_each`; we capture the last index in a var
-        // so it survives the loop in the final state.
+        // for each iteration. The action key tracks the iterator name (so
+        // `foreach iter in ...` keys the action `iter`); we capture the
+        // last index in a var so it survives the loop in the final state.
         let state = run(r#"
             var items: array = [10, 20, 30]
             var seen: int
             foreach iter in items {
-              seen = iterationIndexes("Apply_to_each")
+              seen = iterationIndexes("iter")
             }
         "#)
         .unwrap();

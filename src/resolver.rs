@@ -840,7 +840,15 @@ fn resolve_statements(
                 span,
             } => {
                 let collection = resolve_expr(collection, env)?;
-                let action_name = unique_name(key_prefix::APPLY_TO_EACH, name_counts);
+                // Action key derives from the iterator name so that
+                // `foreach thingy in xs` produces action key `thingy`. Makes
+                // the iterator name the source of truth for both the binding
+                // and the PA action key, which closes the round-trip drift
+                // (decoder picks the iterator name from the original PA
+                // action key; encoder now reproduces that exact key).
+                // Two `foreach thingy in ...` blocks in the same flow get
+                // auto-suffixed by `unique_name` (`thingy`, `thingy_2`, ...).
+                let action_name = unique_name(iter, name_counts);
                 // Iterator and any body-local `let` are scoped to the loop body.
                 // Same named_scopes rollback rationale as the Condition arm.
                 let saved_env = env.clone();
