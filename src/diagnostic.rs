@@ -75,12 +75,27 @@ impl Diagnostic {
 /// renders defensively rather than panicking on string slicing.
 fn bytes_to_chars(src: &str, byte_range: Range<usize>) -> Range<usize> {
     let len = src.len();
-    let start_byte = src.floor_char_boundary(byte_range.start.min(len));
+    let start_byte = floor_char_boundary(src, byte_range.start.min(len));
     let end_clamped = byte_range.end.min(len).max(start_byte);
-    let end_byte = src.ceil_char_boundary(end_clamped);
+    let end_byte = ceil_char_boundary(src, end_clamped);
     let start_char = src[..start_byte].chars().count();
     let span_chars = src[start_byte..end_byte].chars().count();
     start_char..start_char + span_chars
+}
+
+fn floor_char_boundary(src: &str, mut idx: usize) -> usize {
+    while idx > 0 && !src.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn ceil_char_boundary(src: &str, mut idx: usize) -> usize {
+    let len = src.len();
+    while idx < len && !src.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
 }
 
 /// Convert a chumsky lex error into a diagnostic.
