@@ -19,7 +19,6 @@ use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram};
 use serde_json::{Map, Value as JsonValue, json};
 use std::collections::HashMap;
 use std::fmt;
-use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -56,7 +55,7 @@ impl Value {
         serde_json::to_string(&self.to_json()).unwrap_or_default()
     }
 
-    fn as_int(&self) -> Option<i64> {
+    pub(crate) fn as_int(&self) -> Option<i64> {
         match self {
             Value::Int(n) => Some(*n),
             _ => None,
@@ -65,7 +64,7 @@ impl Value {
 
     /// Numeric view: Int and Float both lift to f64. Returns None for
     /// non-numeric values.
-    fn as_number(&self) -> Option<f64> {
+    pub(crate) fn as_number(&self) -> Option<f64> {
         match self {
             Value::Int(n) => Some(*n as f64),
             Value::Float(x) => Some(*x),
@@ -73,14 +72,14 @@ impl Value {
         }
     }
 
-    fn as_bool(&self) -> Option<bool> {
+    pub(crate) fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Bool(b) => Some(*b),
             _ => None,
         }
     }
 
-    fn coerce_str(&self) -> String {
+    pub(crate) fn coerce_str(&self) -> String {
         match self {
             Value::Str(s) => s.clone(),
             Value::Int(n) => n.to_string(),
@@ -95,7 +94,7 @@ impl Value {
     /// fall back to JSON structural equality (the pre-float behavior).
     /// Documented divergence from PA's strict JToken comparison -- paxr is
     /// a simulator, not a spec replica.
-    fn equals(&self, other: &Value) -> bool {
+    pub(crate) fn equals(&self, other: &Value) -> bool {
         if let (Some(a), Some(b)) = (self.as_number(), other.as_number()) {
             return a == b;
         }
@@ -844,465 +843,40 @@ fn eval_unop(op: UnaryOp, v: Value) -> Result<Value, InterpretError> {
     }
 }
 
-/// Evaluates a compiler-synthesized PA function call. Returns the value and
-/// an `unknown` flag the caller uses to decide whether to print a
-/// `<skipping unknown "name">` notice at the current indent.
+/// Dispatches a PA function call through the central registry in
+/// `pa::functions`. Returns the value and an `unknown` flag the caller
+/// uses to decide whether to print a `<skipping unknown "name">` notice
+/// at the current indent.
 ///
-/// Functions implemented here should match PA expression-language semantics
-/// closely enough that paxr is a useful local sanity check. A few PA quirks
-/// worth noting:
-///
-/// - String `startsWith`, `endsWith`, `indexOf`, and `lastIndexOf` are
-///   case-insensitive. `contains` on a string is case-sensitive.
-/// - `length` / `empty` / `contains` are polymorphic: they accept strings,
-///   arrays, and objects.
-/// - String indices are character-based (not byte-based), so Unicode code
-///   points count as one each, matching PA.
+/// The flag is true in three cases: the name is not in the registry,
+/// the arity is not satisfied, or the registry entry exists but has no
+/// paxr evaluator (e.g. `utcNow` / `formatDateTime` -- recognized by
+/// paxc, not simulated locally). All three look the same to the caller,
+/// matching the pre-registry behavior where any failed match arm fell
+/// through to the same unknown branch.
 fn eval_call(name: &str, args: Vec<Value>) -> (Value, bool) {
-    let v = match name {
-        // --- arithmetic / logic (compiler-synthesized from pax operators) ---
-        "add" => binary_int(&args, i64::wrapping_add),
-        "sub" => binary_int(&args, i64::wrapping_sub),
-        "mul" => binary_int(&args, i64::wrapping_mul),
-        "div" => {
-            if args.len() == 2
-                && let (Some(a), Some(b)) = (args[0].as_int(), args[1].as_int())
-                && b != 0
-            {
-                return (Value::Int(a / b), false);
-            }
-            return (Value::Null, false);
-        }
-        "mod" => {
-            if args.len() == 2
-                && let (Some(a), Some(b)) = (args[0].as_int(), args[1].as_int())
-                && b != 0
-            {
-                return (Value::Int(a.rem_euclid(b)), false);
-            }
-            return (Value::Null, false);
-        }
-        "min" => min_or_max_int(&args, true),
-        "max" => min_or_max_int(&args, false),
-        "range" => range_int(&args),
-
-        // --- boolean / comparison ---
-        "coalesce" => {
-            // PA: return the first non-null argument; null if all are null.
-            args.iter()
-                .find(|v| !matches!(v, Value::Null))
-                .cloned()
-                .unwrap_or(Value::Null)
-        }
-        "equals" if args.len() == 2 => Value::Bool(args[0].equals(&args[1])),
-        "less" => binary_cmp(&args, |a, b| a < b),
-        "lessOrEquals" => binary_cmp(&args, |a, b| a <= b),
-        "greater" => binary_cmp(&args, |a, b| a > b),
-        "greaterOrEquals" => binary_cmp(&args, |a, b| a >= b),
-        "not" if args.len() == 1 => match args[0].as_bool() {
-            Some(b) => Value::Bool(!b),
-            None => Value::Null,
-        },
-        "and" => fold_bool(&args, |a, b| a && b),
-        "or" => fold_bool(&args, |a, b| a || b),
-
-        // --- string ---
-        "concat" => {
-            let mut s = String::new();
-            for a in &args {
-                s.push_str(&a.coerce_str());
-            }
-            Value::Str(s)
-        }
-        "toUpper" if args.len() == 1 => match &args[0] {
-            Value::Str(s) => Value::Str(s.to_uppercase()),
-            _ => Value::Null,
-        },
-        "toLower" if args.len() == 1 => match &args[0] {
-            Value::Str(s) => Value::Str(s.to_lowercase()),
-            _ => Value::Null,
-        },
-        "trim" if args.len() == 1 => match &args[0] {
-            Value::Str(s) => Value::Str(s.trim().to_string()),
-            _ => Value::Null,
-        },
-        "substring" => substring_fn(&args),
-        "indexOf" if args.len() == 2 => index_of_ci(&args[0], &args[1], false),
-        "lastIndexOf" if args.len() == 2 => index_of_ci(&args[0], &args[1], true),
-        "startsWith" if args.len() == 2 => string_boundary_ci(&args[0], &args[1], true),
-        "endsWith" if args.len() == 2 => string_boundary_ci(&args[0], &args[1], false),
-        "replace" if args.len() == 3 => match (&args[0], &args[1], &args[2]) {
-            (Value::Str(s), Value::Str(old), Value::Str(new)) if !old.is_empty() => {
-                Value::Str(s.replace(old.as_str(), new))
-            }
-            _ => Value::Null,
-        },
-        "split" if args.len() == 2 => match (&args[0], &args[1]) {
-            (Value::Str(s), Value::Str(delim)) if !delim.is_empty() => Value::Array(
-                s.split(delim.as_str())
-                    .map(|p| Value::Str(p.to_string()))
-                    .collect(),
-            ),
-            _ => Value::Null,
-        },
-        "join" if args.len() == 2 => match (&args[0], &args[1]) {
-            (Value::Array(items), Value::Str(delim)) => {
-                let parts: Vec<String> = items.iter().map(Value::coerce_str).collect();
-                Value::Str(parts.join(delim))
-            }
-            _ => Value::Null,
-        },
-        "uriComponent" if args.len() == 1 => match &args[0] {
-            Value::Str(s) => Value::Str(uri_component_encode(s)),
-            _ => Value::Null,
-        },
-        "uriComponentToString" if args.len() == 1 => match &args[0] {
-            Value::Str(s) => uri_component_decode(s)
-                .map(Value::Str)
-                .unwrap_or(Value::Null),
-            _ => Value::Null,
-        },
-
-        // --- conversion / identity ---
-        "string" if args.len() == 1 => Value::Str(args[0].coerce_str()),
-        "int" if args.len() == 1 => match &args[0] {
-            Value::Int(n) => Value::Int(*n),
-            Value::Str(s) => s
-                .trim()
-                .parse::<i64>()
-                .map(Value::Int)
-                .unwrap_or(Value::Null),
-            Value::Bool(b) => Value::Int(if *b { 1 } else { 0 }),
-            _ => Value::Null,
-        },
-        "bool" if args.len() == 1 => match &args[0] {
-            Value::Bool(b) => Value::Bool(*b),
-            Value::Int(n) => Value::Bool(*n != 0),
-            Value::Str(s) => match s.trim().to_ascii_lowercase().as_str() {
-                "true" | "1" => Value::Bool(true),
-                "false" | "0" => Value::Bool(false),
-                _ => Value::Null,
-            },
-            _ => Value::Null,
-        },
-        "guid" if args.is_empty() => Value::Str(Uuid::new_v4().to_string()),
-        "createArray" => Value::Array(args),
-
-        // --- polymorphic (string + array + object) ---
-        "length" if args.len() == 1 => length_of(&args[0]),
-        "empty" if args.len() == 1 => is_empty(&args[0]),
-        "contains" if args.len() == 2 => contains_of(&args[0], &args[1]),
-
-        // --- array ---
-        "first" if args.len() == 1 => match &args[0] {
-            Value::Array(items) => items.first().cloned().unwrap_or(Value::Null),
-            Value::Str(s) => s
-                .chars()
-                .next()
-                .map(|c| Value::Str(c.to_string()))
-                .unwrap_or(Value::Null),
-            _ => Value::Null,
-        },
-        "last" if args.len() == 1 => match &args[0] {
-            Value::Array(items) => items.last().cloned().unwrap_or(Value::Null),
-            Value::Str(s) => s
-                .chars()
-                .next_back()
-                .map(|c| Value::Str(c.to_string()))
-                .unwrap_or(Value::Null),
-            _ => Value::Null,
-        },
-        "skip" if args.len() == 2 => match (&args[0], args[1].as_int()) {
-            (Value::Array(items), Some(n)) => {
-                let n = n.max(0) as usize;
-                Value::Array(items.iter().skip(n).cloned().collect())
-            }
-            _ => Value::Null,
-        },
-        "take" if args.len() == 2 => match (&args[0], args[1].as_int()) {
-            (Value::Array(items), Some(n)) => {
-                let n = n.max(0) as usize;
-                Value::Array(items.iter().take(n).cloned().collect())
-            }
-            _ => Value::Null,
-        },
-
-        _ => return (Value::Null, true),
+    let Some(def) = crate::pa::functions::lookup(name) else {
+        return (Value::Null, true);
     };
-    (v, false)
-}
-
-/// The exact set of PA expression function names paxr evaluates locally.
-/// Stable handle for tests that pin function-library coverage. Kept in sync
-/// with `eval_call`'s match arms by hand today; once the registry refactor
-/// lands, this returns the names from the FunctionDef table directly.
-pub fn evaluated_function_names() -> &'static [&'static str] {
-    &[
-        // arithmetic / numeric
-        "add",
-        "sub",
-        "mul",
-        "div",
-        "mod",
-        "min",
-        "max",
-        "range",
-        // comparison / logic
-        "coalesce",
-        "equals",
-        "less",
-        "lessOrEquals",
-        "greater",
-        "greaterOrEquals",
-        "not",
-        "and",
-        "or",
-        // string
-        "concat",
-        "toUpper",
-        "toLower",
-        "trim",
-        "substring",
-        "indexOf",
-        "lastIndexOf",
-        "startsWith",
-        "endsWith",
-        "replace",
-        "split",
-        "join",
-        // URI encoding
-        "uriComponent",
-        "uriComponentToString",
-        // conversion / identity
-        "string",
-        "int",
-        "bool",
-        "guid",
-        "createArray",
-        // polymorphic
-        "length",
-        "empty",
-        "contains",
-        // array
-        "first",
-        "last",
-        "skip",
-        "take",
-    ]
-}
-
-fn substring_fn(args: &[Value]) -> Value {
-    if !(args.len() == 2 || args.len() == 3) {
-        return Value::Null;
+    if !def.arity.check(args.len()) {
+        return (Value::Null, true);
     }
-    let Value::Str(s) = &args[0] else {
-        return Value::Null;
-    };
-    let Some(start) = args[1].as_int() else {
-        return Value::Null;
-    };
-    let chars: Vec<char> = s.chars().collect();
-    let start = start.max(0) as usize;
-    if start >= chars.len() {
-        return Value::Str(String::new());
-    }
-    let end = if args.len() == 3 {
-        match args[2].as_int() {
-            Some(n) => (start + n.max(0) as usize).min(chars.len()),
-            None => return Value::Null,
-        }
-    } else {
-        chars.len()
-    };
-    Value::Str(chars[start..end].iter().collect())
-}
-
-/// Case-insensitive search. `from_end` picks lastIndexOf semantics.
-/// Returns char index or -1. An empty needle returns 0 (matches PA).
-fn index_of_ci(haystack: &Value, needle: &Value, from_end: bool) -> Value {
-    let (Value::Str(h), Value::Str(n)) = (haystack, needle) else {
-        return Value::Null;
-    };
-    if n.is_empty() {
-        return Value::Int(0);
-    }
-    let hl = h.to_lowercase();
-    let nl = n.to_lowercase();
-    let byte_idx = if from_end {
-        hl.rfind(&nl)
-    } else {
-        hl.find(&nl)
-    };
-    match byte_idx {
-        Some(b) => Value::Int(hl[..b].chars().count() as i64),
-        None => Value::Int(-1),
+    match def.paxr_eval {
+        Some(eval_fn) => (eval_fn(&args), false),
+        None => (Value::Null, true),
     }
 }
 
-/// Case-insensitive startsWith / endsWith (PA behavior).
-fn string_boundary_ci(haystack: &Value, needle: &Value, is_start: bool) -> Value {
-    let (Value::Str(h), Value::Str(n)) = (haystack, needle) else {
-        return Value::Null;
-    };
-    let hl = h.to_lowercase();
-    let nl = n.to_lowercase();
-    let result = if is_start {
-        hl.starts_with(&nl)
-    } else {
-        hl.ends_with(&nl)
-    };
-    Value::Bool(result)
-}
-
-fn length_of(v: &Value) -> Value {
-    match v {
-        Value::Str(s) => Value::Int(s.chars().count() as i64),
-        Value::Array(items) => Value::Int(items.len() as i64),
-        Value::Object(entries) => Value::Int(entries.len() as i64),
-        _ => Value::Null,
-    }
-}
-
-fn is_empty(v: &Value) -> Value {
-    match v {
-        Value::Null => Value::Bool(true),
-        Value::Str(s) => Value::Bool(s.is_empty()),
-        Value::Array(items) => Value::Bool(items.is_empty()),
-        Value::Object(entries) => Value::Bool(entries.is_empty()),
-        _ => Value::Null,
-    }
-}
-
-fn contains_of(haystack: &Value, needle: &Value) -> Value {
-    match haystack {
-        // PA: string contains is case-sensitive.
-        Value::Str(s) => {
-            let n = needle.coerce_str();
-            Value::Bool(s.contains(&n))
-        }
-        Value::Array(items) => Value::Bool(items.iter().any(|i| i.equals(needle))),
-        Value::Object(entries) => {
-            let n = needle.coerce_str();
-            Value::Bool(entries.iter().any(|(k, _)| k == &n))
-        }
-        _ => Value::Null,
-    }
-}
-
-/// `min(a, b, c, ...)` or `min([a, b, c])`. PA supports both forms.
-/// `smallest = true` picks min, false picks max. Empty input → Null.
-fn min_or_max_int(args: &[Value], smallest: bool) -> Value {
-    let nums: Option<Vec<i64>> = if args.len() == 1 {
-        match &args[0] {
-            Value::Array(items) => items.iter().map(Value::as_int).collect(),
-            _ => args.iter().map(Value::as_int).collect(),
-        }
-    } else {
-        args.iter().map(Value::as_int).collect()
-    };
-    match nums {
-        Some(ns) if !ns.is_empty() => {
-            let picked = if smallest {
-                *ns.iter().min().unwrap()
-            } else {
-                *ns.iter().max().unwrap()
-            };
-            Value::Int(picked)
-        }
-        _ => Value::Null,
-    }
-}
-
-fn range_int(args: &[Value]) -> Value {
-    if args.len() == 2
-        && let (Some(start), Some(count)) = (args[0].as_int(), args[1].as_int())
-        && count >= 0
-    {
-        return Value::Array((0..count).map(|i| Value::Int(start + i)).collect());
-    }
-    Value::Null
-}
-
-/// RFC 3986 percent-encoding for PA's `uriComponent`. Unreserved chars
-/// (ALPHA / DIGIT / `-` / `_` / `.` / `~`) pass through; everything else
-/// including multi-byte UTF-8 gets `%XX` per byte. Matches the JavaScript
-/// `encodeURIComponent` behavior PA uses under the hood.
-fn uri_component_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                use std::fmt::Write;
-                let _ = write!(out, "%{b:02X}");
-            }
-        }
-    }
-    out
-}
-
-/// Inverse of `uri_component_encode`. Returns None if the input contains a
-/// malformed escape or decodes to invalid UTF-8.
-fn uri_component_decode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if i + 2 >= bytes.len() {
-                return None;
-            }
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
-            let v = u8::from_str_radix(hex, 16).ok()?;
-            out.push(v);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
-}
-
-fn binary_int<F: Fn(i64, i64) -> i64>(args: &[Value], f: F) -> Value {
-    if args.len() == 2
-        && let (Some(a), Some(b)) = (args[0].as_int(), args[1].as_int())
-    {
-        return Value::Int(f(a, b));
-    }
-    Value::Null
-}
-
-fn binary_cmp<F: Fn(i64, i64) -> bool>(args: &[Value], f: F) -> Value {
-    if args.len() == 2
-        && let (Some(a), Some(b)) = (args[0].as_int(), args[1].as_int())
-    {
-        return Value::Bool(f(a, b));
-    }
-    Value::Null
-}
-
-/// Variadic boolean fold for `and` / `or`. PA's semantics:
-/// zero args → null (no identity element baked in), one arg → the arg
-/// as-is, two-or-more → fold left with `f`. Any non-boolean argument
-/// short-circuits to null.
-fn fold_bool<F: Fn(bool, bool) -> bool>(args: &[Value], f: F) -> Value {
-    if args.is_empty() {
-        return Value::Null;
-    }
-    let mut acc = match args[0].as_bool() {
-        Some(b) => b,
-        None => return Value::Null,
-    };
-    for v in &args[1..] {
-        match v.as_bool() {
-            Some(b) => acc = f(acc, b),
-            None => return Value::Null,
-        }
-    }
-    Value::Bool(acc)
+/// PA function names paxr evaluates locally, derived from the central
+/// registry in `pa::functions`. Stable handle for tests that pin
+/// function-library coverage; the shape returned is allocation-cheap
+/// (a Vec built on demand from a 45-entry static slice).
+pub fn evaluated_function_names() -> Vec<&'static str> {
+    crate::pa::functions::FUNCTIONS
+        .iter()
+        .filter(|f| f.paxr_eval.is_some())
+        .map(|f| f.name)
+        .collect()
 }
 
 fn span_to_line(src: &str, byte_offset: usize) -> usize {

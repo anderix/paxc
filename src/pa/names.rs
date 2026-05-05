@@ -74,39 +74,18 @@ pub mod trigger_type {
     pub const RECURRENCE: &str = "Recurrence";
 }
 
-/// Whether `name` matches a function paxr implements or a common PA
-/// expression function. Used by the resolver-error diagnostic to suggest
-/// "did you mean to call it?" when an undefined identifier matches a
-/// known PA function. Conservative list: add only names that are clearly
-/// function-shaped in PA land, to avoid false hints on plain identifier
-/// typos. Pax type keywords (`array`, `object`) are excluded because they
-/// are not callable PA functions; `int`, `string`, and `bool` ARE real
-/// PA functions, so those stay in.
+/// Whether `name` matches a function paxc recognizes (via the central
+/// registry) or a PA expression accessor. Used by the resolver-error
+/// diagnostic to suggest "did you mean to call it?" when an undefined
+/// identifier matches a known PA name.
+///
+/// Derives from `pa::functions::FUNCTIONS` (which holds all callable PA
+/// functions, with or without paxr support) plus `pa::functions::ACCESSORS`
+/// (the bare expression-prefix names users sometimes call without parens).
+/// Pax type keywords (`array`, `object`) are deliberately not in either
+/// list, so they don't trigger false hints on plain identifier typos.
 pub fn is_known_function(name: &str) -> bool {
-    matches!(
-        name,
-        // arithmetic / logic
-        "add" | "sub" | "mul" | "div" | "mod"
-        | "min" | "max" | "range"
-        | "concat" | "equals"
-        | "less" | "lessOrEquals" | "greater" | "greaterOrEquals"
-        | "not" | "and" | "or"
-        // text
-        | "toLower" | "toUpper" | "trim" | "substring"
-        | "indexOf" | "lastIndexOf" | "startsWith" | "endsWith"
-        | "replace" | "split"
-        // polymorphic + array
-        | "length" | "empty" | "contains"
-        | "first" | "last" | "skip" | "take" | "join"
-        // conversion + utility
-        | "string" | "int" | "bool" | "guid"
-        | "coalesce" | "createArray"
-        | "uriComponent" | "uriComponentToString"
-        // common PA expression functions users reach for without (...)
-        | "body" | "items" | "outputs" | "variables" | "parameters"
-        | "triggerBody" | "triggerOutputs"
-        | "utcNow" | "formatDateTime"
-    )
+    super::functions::lookup(name).is_some() || super::functions::ACCESSORS.contains(&name)
 }
 
 #[cfg(test)]
