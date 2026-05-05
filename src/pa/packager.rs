@@ -153,6 +153,7 @@ fn transform_for_pa(compiled: &Value) -> Value {
         if let Some(v) = old.get("actions") {
             let mut actions = v.clone();
             lowercase_var_types(&mut actions);
+            strip_connector_authentication(&mut actions);
             out.insert("actions".to_string(), actions);
         }
     }
@@ -231,6 +232,61 @@ fn lowercase_var_types(actions: &mut Value) {
     }
 }
 
+/// PA's exporter writes `inputs.authentication: "@parameters('$authentication')"`
+/// on connector actions, but its importer rejects the same field with
+/// `WorkflowRunActionInputsInvalidProperty`. The authentication is auto-injected
+/// at runtime from `connectionReferences`, so the field is redundant on import.
+/// Strip it from `OpenApiConnection` / `OpenApiConnectionWebhook` actions and
+/// recurse through container bodies to catch nested connectors.
+fn strip_connector_authentication(actions: &mut Value) {
+    let Some(obj) = actions.as_object_mut() else {
+        return;
+    };
+    for (_, action) in obj.iter_mut() {
+        let Some(a) = action.as_object_mut() else {
+            continue;
+        };
+        let kind = a
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        match kind.as_str() {
+            "OpenApiConnection" | "OpenApiConnectionWebhook" => {
+                if let Some(inputs) = a.get_mut("inputs").and_then(|v| v.as_object_mut()) {
+                    inputs.remove("authentication");
+                }
+            }
+            "Foreach" | "Scope" | "Until" => {
+                if let Some(nested) = a.get_mut("actions") {
+                    strip_connector_authentication(nested);
+                }
+            }
+            "If" => {
+                if let Some(nested) = a.get_mut("actions") {
+                    strip_connector_authentication(nested);
+                }
+                if let Some(else_obj) = a.get_mut("else").and_then(|e| e.get_mut("actions")) {
+                    strip_connector_authentication(else_obj);
+                }
+            }
+            "Switch" => {
+                if let Some(cases) = a.get_mut("cases").and_then(|v| v.as_object_mut()) {
+                    for (_, case) in cases.iter_mut() {
+                        if let Some(nested) = case.get_mut("actions") {
+                            strip_connector_authentication(nested);
+                        }
+                    }
+                }
+                if let Some(default) = a.get_mut("default").and_then(|d| d.get_mut("actions")) {
+                    strip_connector_authentication(default);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn build_root_manifest(
     name: &str,
     package_guid: &str,
@@ -300,4 +356,88 @@ fn write_zip(out_path: &Path, files: &[(String, Vec<u8>)]) -> Result<(), Package
     }
     zip.finish()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_connector_authentication_removes_field_at_top_level() {
+        let mut actions = json!({
+            "Get_items": {
+                "type": "OpenApiConnection",
+                "inputs": {
+                    "parameters": { "$top": 5 },
+                    "host": { "apiId": "x" },
+                    "authentication": "@parameters('$authentication')"
+                }
+            }
+        });
+        strip_connector_authentication(&mut actions);
+        let inputs = &actions["Get_items"]["inputs"];
+        assert!(inputs.get("authentication").is_none());
+        assert!(inputs.get("parameters").is_some());
+        assert!(inputs.get("host").is_some());
+    }
+
+    #[test]
+    fn strip_connector_authentication_recurses_through_containers() {
+        let mut actions = json!({
+            "Apply_to_each": {
+                "type": "Foreach",
+                "actions": {
+                    "If_check": {
+                        "type": "If",
+                        "actions": {
+                            "Inner_call": {
+                                "type": "OpenApiConnectionWebhook",
+                                "inputs": {
+                                    "host": {},
+                                    "authentication": "@parameters('$authentication')"
+                                }
+                            }
+                        },
+                        "else": {
+                            "actions": {
+                                "Else_call": {
+                                    "type": "OpenApiConnection",
+                                    "inputs": {
+                                        "host": {},
+                                        "authentication": "@parameters('$authentication')"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        strip_connector_authentication(&mut actions);
+        let inner =
+            &actions["Apply_to_each"]["actions"]["If_check"]["actions"]["Inner_call"]["inputs"];
+        let else_call = &actions["Apply_to_each"]["actions"]["If_check"]["else"]["actions"]["Else_call"]
+            ["inputs"];
+        assert!(inner.get("authentication").is_none());
+        assert!(else_call.get("authentication").is_none());
+    }
+
+    #[test]
+    fn strip_connector_authentication_leaves_non_connectors_alone() {
+        // Variable / Compose actions don't have inputs.authentication, but
+        // the pass should be a no-op even on hypothetical other types.
+        let mut actions = json!({
+            "Initialize_x": {
+                "type": "InitializeVariable",
+                "inputs": { "variables": [{ "name": "x", "type": "Integer" }] }
+            },
+            "Compose_y": {
+                "type": "Compose",
+                "inputs": "hello"
+            }
+        });
+        let snapshot = actions.clone();
+        strip_connector_authentication(&mut actions);
+        assert_eq!(actions, snapshot);
+    }
 }
