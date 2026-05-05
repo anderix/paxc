@@ -163,6 +163,7 @@ pub fn decode(input: &Value, basename: &str, out_dir: &Path) -> Result<DecodeRep
     let mut used_names: HashSet<String> = HashSet::new();
     let mut pa_files_written: Vec<PathBuf> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    let mut target_names: HashMap<String, String> = HashMap::new();
 
     let stmts = {
         let mut ctx = DecodeCtx {
@@ -171,6 +172,7 @@ pub fn decode(input: &Value, basename: &str, out_dir: &Path) -> Result<DecodeRep
             name_map: &mut name_map,
             pa_files_written: &mut pa_files_written,
             warnings: &mut warnings,
+            target_names: &mut target_names,
         };
         decode_actions_block(actions, &HashSet::new(), &HashMap::new(), &mut ctx)?
     };
@@ -406,12 +408,95 @@ enum NativeStmt {
         name: Option<String>,
         body: Vec<NativeStmt>,
     },
+    /// Pax `terminate <status> [message]`. The PA action is `Terminate` with
+    /// `inputs.runStatus` carrying the status and an optional
+    /// `inputs.runError.message` carrying the message (only when status is
+    /// Failed). Message is already-rendered pax source (a string literal or
+    /// PA-expression-translated value); when None, no message clause is
+    /// emitted.
+    Terminate {
+        status: TerminateKind,
+        message: Option<String>,
+    },
+    /// Pax `on <statuses> <target> { ... }`. Decoded from a Scope action
+    /// whose `runAfter` is handler-style (a single target with one or more
+    /// non-Succeeded statuses, or a status set that PA wouldn't generate as
+    /// a structural sibling-chain edge). `target` is the pax-side
+    /// identifier referencing the addressable scope or pa block this
+    /// handler is attached to. `statuses` is non-empty and in source order
+    /// (the order they appeared in PA's runAfter status array).
+    OnHandler {
+        statuses: Vec<HandlerKind>,
+        target: String,
+        body: Vec<NativeStmt>,
+    },
     /// Fallback: `pa <Name>` referencing a `pa/<Name>.json` file written
     /// alongside. Used when an action type isn't natively decodable, OR
     /// when a container's required structural piece (condition expression,
     /// foreach collection, switch subject, etc.) doesn't render — the whole
     /// container falls back as one opaque action.
     Pa { name: String },
+}
+
+/// The three runStatus values PA's Terminate action accepts. Mirrors
+/// `ast::TerminateStatus` but lives in the decoder so the decoder doesn't
+/// reach across module boundaries for an enum it owns the meaning of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminateKind {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl TerminateKind {
+    fn from_pa(s: &str) -> Option<Self> {
+        match s {
+            "Succeeded" => Some(TerminateKind::Succeeded),
+            "Failed" => Some(TerminateKind::Failed),
+            "Cancelled" => Some(TerminateKind::Cancelled),
+            _ => None,
+        }
+    }
+
+    fn keyword(self) -> &'static str {
+        match self {
+            TerminateKind::Succeeded => "succeeded",
+            TerminateKind::Failed => "failed",
+            TerminateKind::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// The four runAfter statuses PA recognizes. Mirrors `ast::HandlerStatus`.
+/// The on-handler decoder accepts any subset; the formatter joins them with
+/// `or` in source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandlerKind {
+    Succeeded,
+    Failed,
+    Skipped,
+    TimedOut,
+}
+
+impl HandlerKind {
+    fn from_pa(s: &str) -> Option<Self> {
+        match s {
+            "Succeeded" => Some(HandlerKind::Succeeded),
+            "Failed" => Some(HandlerKind::Failed),
+            "Skipped" => Some(HandlerKind::Skipped),
+            "TimedOut" => Some(HandlerKind::TimedOut),
+            _ => None,
+        }
+    }
+
+    fn keyword(self) -> &'static str {
+        match self {
+            HandlerKind::Succeeded => "succeeded",
+            HandlerKind::Failed => "failed",
+            HandlerKind::Skipped => "skipped",
+            HandlerKind::TimedOut => "timedout",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -456,7 +541,9 @@ impl PaxType {
 /// Mutable state threaded through every decode call: the shared `pa/`
 /// directory, the global used-names set (so fallback action keys are unique
 /// across the whole flow including nested fallbacks), the original→normalized
-/// name map, the list of files written to disk, and the warnings vec.
+/// name map, the list of files written to disk, the warnings vec, and the
+/// target-names map (PA action key → pax-side addressable identifier, used
+/// by on-handler decoding to look up the target's pax name).
 ///
 /// Per-scope state (bindings, iterators) is passed separately by value so
 /// nested scopes get clone-and-extend semantics — an inner `let` in an if
@@ -467,6 +554,14 @@ struct DecodeCtx<'a> {
     name_map: &'a mut HashMap<String, String>,
     pa_files_written: &'a mut Vec<PathBuf>,
     warnings: &'a mut Vec<String>,
+    /// PA action key → pax-side identifier, registered as actions decode.
+    /// Only populated for actions an `on <status> <target>` handler can
+    /// reference: named scopes (Scope_<label> → label) and pa blocks
+    /// (PA_key → normalized_pax_name). A natively-decoded variable, let,
+    /// foreach, etc. has no pax-side identifier addressable from outside,
+    /// so it never enters this map; an on-handler whose target is one of
+    /// those falls back.
+    target_names: &'a mut HashMap<String, String>,
 }
 
 /// Decode a PA actions map (top-level or inside a container) into a vector
@@ -503,14 +598,18 @@ fn decode_actions_block(
             .to_string();
 
         let handler_edge = is_handler_runafter(action_obj.get("runAfter"));
-        if handler_edge {
-            ctx.warnings.push(format!(
-                "note: action `{original_key}` has handler-style runAfter; falling back to pa <Name> (slice 44d does not yet decode on-handlers)"
-            ));
-        }
 
         let stmt = if handler_edge {
-            None
+            // Try native on-handler decoding first. The target's pax-side
+            // name comes from `ctx.target_names`, populated by earlier
+            // iterations as Scopes and Pa fallbacks were processed.
+            try_decode_on_handler(
+                action_obj,
+                &action_type,
+                &local_bindings,
+                &local_iterators,
+                ctx,
+            )?
         } else {
             let render_ctx = paexpr::RenderCtx::new(&local_bindings, &local_iterators);
             match try_decode_native(original_key, &action_type, action_obj, &render_ctx) {
@@ -532,23 +631,106 @@ fn decode_actions_block(
                 s
             }
             None => {
-                if !handler_edge {
-                    ctx.warnings.push(format!(
-                        "note: action `{original_key}` (type {}) not yet decoded natively; emitted as pa block",
-                        if action_type.is_empty() {
-                            "<unknown>"
-                        } else {
-                            action_type.as_str()
-                        }
-                    ));
-                }
+                let reason = if handler_edge {
+                    " (handler-style runAfter; target not addressable as a scope/pa name)"
+                } else {
+                    ""
+                };
+                ctx.warnings.push(format!(
+                    "note: action `{original_key}` (type {}){reason} not decoded natively; emitted as pa block",
+                    if action_type.is_empty() {
+                        "<unknown>"
+                    } else {
+                        action_type.as_str()
+                    }
+                ));
                 fallback_to_pa(original_key, action, ctx)?
             }
         };
+
+        // Register addressable targets so later on-handlers can find them.
+        register_target_name(original_key, &resolved, ctx);
         out.push(resolved);
     }
 
     Ok(out)
+}
+
+/// Record a PA action key → pax-side identifier mapping when the resolved
+/// statement is something an on-handler can target. Named scopes register
+/// their label; pa-block fallbacks register their normalized name. Other
+/// shapes (variables, lets, anonymous scopes, containers) have no
+/// addressable identifier from outside their declaration site, so they're
+/// not registered — a handler whose target is one of them would fall back.
+fn register_target_name(pa_key: &str, stmt: &NativeStmt, ctx: &mut DecodeCtx<'_>) {
+    match stmt {
+        NativeStmt::Scope {
+            name: Some(label), ..
+        } => {
+            ctx.target_names.insert(pa_key.to_string(), label.clone());
+        }
+        NativeStmt::Pa { name } => {
+            ctx.target_names.insert(pa_key.to_string(), name.clone());
+        }
+        _ => {}
+    }
+}
+
+/// Try to decode a Scope action with handler-style runAfter as a pax
+/// `on <statuses> <target> { ... }` block. Returns Ok(None) when:
+///   - the action isn't a Scope (handlers in PA are always Scope-shaped),
+///   - the runAfter has multiple target keys (pax `on` addresses ONE target),
+///   - the target's pax-side identifier isn't known yet (it's an action
+///     type pax can't reference by name — variable lifecycle, let,
+///     anonymous scope, container — or it's somehow not in topo-sort
+///     order before the handler).
+///
+/// In any of those cases the caller falls back to a pa block. The whole
+/// handler body still tries to decode natively (each child action goes
+/// through the normal path), so even a fallback handler keeps inner
+/// natives where possible.
+fn try_decode_on_handler(
+    action: &Map<String, Value>,
+    action_type: &str,
+    bindings: &HashSet<String>,
+    iterators: &HashMap<String, String>,
+    ctx: &mut DecodeCtx<'_>,
+) -> Result<Option<NativeStmt>, DecodeError> {
+    if action_type != "Scope" {
+        return Ok(None);
+    }
+    let run_after = match action.get("runAfter").and_then(Value::as_object) {
+        Some(o) if o.len() == 1 => o,
+        _ => return Ok(None),
+    };
+    let (target_pa_key, statuses_value) = run_after.iter().next().unwrap();
+    let Some(statuses_arr) = statuses_value.as_array() else {
+        return Ok(None);
+    };
+    let mut statuses: Vec<HandlerKind> = Vec::with_capacity(statuses_arr.len());
+    for s in statuses_arr {
+        let Some(kind) = s.as_str().and_then(HandlerKind::from_pa) else {
+            return Ok(None);
+        };
+        statuses.push(kind);
+    }
+    if statuses.is_empty() {
+        return Ok(None);
+    }
+    let Some(target) = ctx.target_names.get(target_pa_key).cloned() else {
+        return Ok(None);
+    };
+    let empty = Map::new();
+    let inner = action
+        .get("actions")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let body = decode_actions_block(inner, bindings, iterators, ctx)?;
+    Ok(Some(NativeStmt::OnHandler {
+        statuses,
+        target,
+        body,
+    }))
 }
 
 /// Track new pax bindings introduced by a freshly-decoded statement. Vars
@@ -628,8 +810,38 @@ fn try_decode_native(
             let value = paexpr::json_to_pax(inputs, ctx)?;
             Some(NativeStmt::Let { name, value })
         }
+        "Terminate" => decode_terminate(action, ctx),
         _ => None,
     }
+}
+
+/// Recover `terminate <status> [message]` from a PA Terminate action.
+/// Returns None if `runStatus` is missing or unrecognized; for Failed with
+/// a `runError.message`, the message must render via paexpr (literal or
+/// translatable expression), otherwise the whole action falls back so the
+/// message isn't lost. Other status values can't carry a message in pax,
+/// so an extraneous `runError` block on Succeeded/Cancelled is dropped
+/// quietly — PA's contract is that those statuses don't use the field.
+fn decode_terminate(
+    action: &Map<String, Value>,
+    ctx: &paexpr::RenderCtx<'_>,
+) -> Option<NativeStmt> {
+    let inputs = action.get("inputs")?.as_object()?;
+    let status_str = inputs.get("runStatus")?.as_str()?;
+    let status = TerminateKind::from_pa(status_str)?;
+    let message = if status == TerminateKind::Failed {
+        match inputs
+            .get("runError")
+            .and_then(Value::as_object)
+            .and_then(|o| o.get("message"))
+        {
+            Some(v) => Some(paexpr::json_to_pax(v, ctx)?),
+            None => None,
+        }
+    } else {
+        None
+    };
+    Some(NativeStmt::Terminate { status, message })
 }
 
 /// Container action types: If/Foreach/Until/Switch/Scope. Each recurses
@@ -967,11 +1179,15 @@ fn native_target_available(stmt: &NativeStmt, declared: &HashSet<String>) -> boo
         // Container statements always pass this gate — their internals are
         // gated separately by the recursive decode in their bodies. The
         // `Pa` fallback is unconditional (the body's already on disk).
+        // `Terminate` and `OnHandler` are leaf-or-container statements
+        // with no binding interaction.
         NativeStmt::If { .. }
         | NativeStmt::Foreach { .. }
         | NativeStmt::Until { .. }
         | NativeStmt::Switch { .. }
         | NativeStmt::Scope { .. }
+        | NativeStmt::Terminate { .. }
+        | NativeStmt::OnHandler { .. }
         | NativeStmt::Pa { .. } => true,
     }
 }
@@ -1071,6 +1287,25 @@ fn format_native_stmt(stmt: &NativeStmt, depth: usize) -> String {
                 None => format!("{indent}scope {{"),
             };
             let mut s = format!("{header}\n");
+            push_body(&mut s, body, depth + 1);
+            s.push_str(&format!("{indent}}}"));
+            s
+        }
+        NativeStmt::Terminate { status, message } => match message {
+            Some(msg) => format!("{indent}terminate {} {msg}", status.keyword()),
+            None => format!("{indent}terminate {}", status.keyword()),
+        },
+        NativeStmt::OnHandler {
+            statuses,
+            target,
+            body,
+        } => {
+            let status_part = statuses
+                .iter()
+                .map(|s| s.keyword())
+                .collect::<Vec<_>>()
+                .join(" or ");
+            let mut s = format!("{indent}on {status_part} {target} {{\n");
             push_body(&mut s, body, depth + 1);
             s.push_str(&format!("{indent}}}"));
             s
@@ -2357,5 +2592,273 @@ mod tests {
         assert_eq!(scope_label("Scope"), None);
         // Non-pax-identifier labels fall back to anonymous.
         assert_eq!(scope_label("Scope_my-label"), None);
+    }
+
+    // ---------- 44e: Terminate ----------
+
+    #[test]
+    fn decode_terminate_succeeded_no_message() {
+        let action = json!({
+            "type": "Terminate",
+            "inputs": { "runStatus": "Succeeded" }
+        });
+        let stmt = try_decode(&action).unwrap();
+        assert_eq!(format_native_stmt(&stmt, 0), "terminate succeeded");
+    }
+
+    #[test]
+    fn decode_terminate_failed_with_string_message() {
+        let action = json!({
+            "type": "Terminate",
+            "inputs": {
+                "runStatus": "Failed",
+                "runError": { "message": "boom" }
+            }
+        });
+        let stmt = try_decode(&action).unwrap();
+        assert_eq!(format_native_stmt(&stmt, 0), "terminate failed \"boom\"");
+    }
+
+    #[test]
+    fn decode_terminate_failed_with_expression_message() {
+        let action = json!({
+            "type": "Terminate",
+            "inputs": {
+                "runStatus": "Failed",
+                "runError": { "message": "@variables('reason')" }
+            }
+        });
+        let stmt = try_decode_with_bindings(&action, &["reason"]).unwrap();
+        assert_eq!(format_native_stmt(&stmt, 0), "terminate failed reason");
+    }
+
+    #[test]
+    fn decode_terminate_cancelled_drops_runerror() {
+        // PA's contract is that Cancelled doesn't carry a runError; if one
+        // appears we ignore it and emit `terminate cancelled`.
+        let action = json!({
+            "type": "Terminate",
+            "inputs": {
+                "runStatus": "Cancelled",
+                "runError": { "message": "ignored" }
+            }
+        });
+        let stmt = try_decode(&action).unwrap();
+        assert_eq!(format_native_stmt(&stmt, 0), "terminate cancelled");
+    }
+
+    #[test]
+    fn decode_terminate_unknown_status_falls_back() {
+        let action = json!({
+            "type": "Terminate",
+            "inputs": { "runStatus": "WeirdStatus" }
+        });
+        assert!(try_decode(&action).is_none());
+    }
+
+    #[test]
+    fn decode_terminate_failed_unrenderable_message_falls_back() {
+        // The message references triggerBody — no native form yet — so the
+        // whole action falls back rather than dropping the message silently.
+        let action = json!({
+            "type": "Terminate",
+            "inputs": {
+                "runStatus": "Failed",
+                "runError": { "message": "@triggerBody()" }
+            }
+        });
+        assert!(try_decode(&action).is_none());
+    }
+
+    // ---------- 44e: on-handler ----------
+
+    #[test]
+    fn decode_on_handler_targeting_named_scope() {
+        let input = json!({
+            "properties": {
+                "displayName": "Handler",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Scope_try_work": {
+                            "type": "Scope",
+                            "runAfter": {},
+                            "actions": {}
+                        },
+                        "On_failure": {
+                            "type": "Scope",
+                            "runAfter": { "Scope_try_work": ["Failed"] },
+                            "actions": {
+                                "Terminate": {
+                                    "type": "Terminate",
+                                    "runAfter": {},
+                                    "inputs": { "runStatus": "Failed", "runError": { "message": "x" } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("on_handler_scope");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(pax.contains("scope try_work {"), "pax was: {pax}");
+        assert!(pax.contains("on failed try_work {"), "pax was: {pax}");
+        assert!(pax.contains("terminate failed \"x\""), "pax was: {pax}");
+        assert!(!dir.join("pa/On_failure.json").exists());
+    }
+
+    #[test]
+    fn decode_on_handler_multi_status() {
+        let input = json!({
+            "properties": {
+                "displayName": "Handler",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Scope_work": { "type": "Scope", "runAfter": {}, "actions": {} },
+                        "Bail": {
+                            "type": "Scope",
+                            "runAfter": { "Scope_work": ["Failed", "TimedOut", "Skipped"] },
+                            "actions": {}
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("on_multistatus");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(
+            pax.contains("on failed or timedout or skipped work {"),
+            "pax was: {pax}"
+        );
+    }
+
+    #[test]
+    fn decode_on_handler_targeting_pa_block() {
+        // The target is a non-natively-decoded action (OpenApiConnection),
+        // which becomes a `pa Foo` block. The handler targets that pa block
+        // by its (normalized) pax name.
+        let input = json!({
+            "properties": {
+                "displayName": "Handler",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "HTTP_call": {
+                            "type": "OpenApiConnection",
+                            "runAfter": {},
+                            "inputs": {}
+                        },
+                        "On_call_failed": {
+                            "type": "Scope",
+                            "runAfter": { "HTTP_call": ["Failed"] },
+                            "actions": {}
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("on_pa_block");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(pax.contains("pa HTTP_call"), "pax was: {pax}");
+        assert!(pax.contains("on failed HTTP_call {"), "pax was: {pax}");
+    }
+
+    #[test]
+    fn decode_on_handler_with_unaddressable_target_falls_back() {
+        // Target is a variable lifecycle action which has no pax-side
+        // identifier accessible from outside. Handler falls back as a pa
+        // block (and a warning surfaces).
+        let input = json!({
+            "properties": {
+                "displayName": "Handler",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Initialize_x": {
+                            "type": "InitializeVariable",
+                            "runAfter": {},
+                            "inputs": { "variables": [{ "name": "x", "type": "Integer", "value": 0 }] }
+                        },
+                        "On_init_failed": {
+                            "type": "Scope",
+                            "runAfter": { "Initialize_x": ["Failed"] },
+                            "actions": {}
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("on_unaddressable");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(pax.contains("var x: int = 0"), "pax was: {pax}");
+        assert!(pax.contains("pa On_init_failed"), "pax was: {pax}");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("On_init_failed") && w.contains("handler-style")),
+            "warnings: {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn decode_on_handler_anonymous_scope_target_falls_back() {
+        // Anonymous scopes have no source-level identifier, so a handler
+        // targeting one can't be expressed natively. Falls back.
+        let input = json!({
+            "properties": {
+                "displayName": "Handler",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Scope": { "type": "Scope", "runAfter": {}, "actions": {} },
+                        "On_anon_failed": {
+                            "type": "Scope",
+                            "runAfter": { "Scope": ["Failed"] },
+                            "actions": {}
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("on_anon");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(pax.contains("scope {"), "pax was: {pax}");
+        assert!(pax.contains("pa On_anon_failed"), "pax was: {pax}");
+    }
+
+    #[test]
+    fn decode_on_handler_multi_target_runafter_falls_back() {
+        // PA could have a Scope with runAfter pointing at multiple targets;
+        // pax `on` addresses one. Falls back.
+        let input = json!({
+            "properties": {
+                "displayName": "Handler",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Scope_a": { "type": "Scope", "runAfter": {}, "actions": {} },
+                        "Scope_b": { "type": "Scope", "runAfter": {}, "actions": {} },
+                        "On_either_failed": {
+                            "type": "Scope",
+                            "runAfter": { "Scope_a": ["Failed"], "Scope_b": ["Failed"] },
+                            "actions": {}
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("on_multitarget");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(pax.contains("pa On_either_failed"), "pax was: {pax}");
     }
 }

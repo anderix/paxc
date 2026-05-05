@@ -306,3 +306,69 @@ fn normalize_for_lookup(key: &str) -> String {
     }
     out.trim_matches('_').to_string()
 }
+
+/// Slice 44f integration check: a PA action key with characters outside
+/// `[A-Za-z_][A-Za-z0-9_]*` (here `Send_an_email_(V2)`) decodes to a
+/// pax-safe `pa Send_an_email_V2`, and re-encoding via the resolver/emitter
+/// pipeline restores the original key — proving `pa/flow.json.actionNameMap`
+/// is being read on the encode side.
+#[test]
+fn decode_then_encode_preserves_original_pa_action_key() {
+    use serde_json::json;
+
+    let input = json!({
+        "properties": {
+            "displayName": "Name Map Round-Trip",
+            "definition": {
+                "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+                "contentVersion": "1.0.0.0",
+                "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                "actions": {
+                    "Send_an_email_(V2)": {
+                        "type": "OpenApiConnection",
+                        "runAfter": {},
+                        "inputs": { "method": "POST" }
+                    }
+                }
+            }
+        }
+    });
+
+    let dir = tmp_dir("namemap_roundtrip");
+    let input_path = dir.join("input.json");
+    fs::write(&input_path, serde_json::to_vec_pretty(&input).unwrap()).unwrap();
+
+    let _report = decoder::decode_file(&input_path, &dir).expect("decode");
+
+    // The decoded pax should reference the safe name.
+    let pax = fs::read_to_string(dir.join("input.pax")).unwrap();
+    assert!(
+        pax.contains("pa Send_an_email_V2"),
+        "decoded pax should use the pax-safe name, got: {pax}"
+    );
+
+    // pa/flow.json should carry the actionNameMap.
+    let flow_meta: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("pa/flow.json")).unwrap()).unwrap();
+    assert_eq!(
+        flow_meta["actionNameMap"]["Send_an_email_(V2)"],
+        "Send_an_email_V2"
+    );
+
+    // Re-encode through the resolver/emitter pipeline. The resolver reads
+    // actionNameMap and overrides the emit name back to the original.
+    let reemitted = compile_pax_to_definition(&dir.join("input.pax"));
+    let actions = reemitted["definition"]["actions"]
+        .as_object()
+        .expect("actions object");
+    assert!(
+        actions.contains_key("Send_an_email_(V2)"),
+        "expected re-emit to restore original PA key; got keys: {:?}",
+        actions.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !actions.contains_key("Send_an_email_V2"),
+        "the pax-safe name should NOT appear in the re-emitted JSON; got keys: {:?}",
+        actions.keys().collect::<Vec<_>>()
+    );
+}

@@ -491,6 +491,12 @@ pub fn resolve(
     // block (scope / pa) share this namespace; PA would otherwise end up
     // with two identically-labeled actions in the compiled flow.
     let mut declared_targets: HashSet<String> = HashSet::new();
+    // Optional pax-safe → PA-original name override map, sourced from
+    // `pa/flow.json.actionNameMap`. When the decoder normalized a PA action
+    // key (e.g. `Send_an_email_(V2)` → `Send_an_email_V2`) to fit pax's
+    // identifier rules, this lets the encode side swap back so the round
+    // trip preserves the original key in the emitted flow JSON.
+    let pa_overrides = source_dir.and_then(read_pa_action_overrides);
     let actions = resolve_statements(
         &program.statements,
         &mut env,
@@ -498,6 +504,7 @@ pub fn resolve(
         &mut named_scopes,
         &mut declared_targets,
         source_dir,
+        pa_overrides.as_ref(),
         true,
     )?;
     let trigger = match source_dir {
@@ -563,6 +570,31 @@ fn discover_trigger(source_dir: &Path) -> Result<ResolvedTrigger, ResolveError> 
     }
 }
 
+/// Read `<source_dir>/pa/flow.json` for the `actionNameMap` (PA-original →
+/// pax-safe identifier, populated by the decoder when ingesting an export
+/// whose PA action keys had characters outside `[A-Za-z0-9_]`). Returns the
+/// INVERSE (pax-safe → PA-original) so the resolver can swap a `pa <Name>`
+/// statement back to the PA action key on emit. Silent failures (file
+/// missing, malformed, no actionNameMap field) return None — name fidelity
+/// is best-effort; the round-trip works even without it.
+fn read_pa_action_overrides(source_dir: &Path) -> Option<HashMap<String, String>> {
+    let path = source_dir.join("pa").join("flow.json");
+    let bytes = std::fs::read(&path).ok()?;
+    let value: JsonValue = serde_json::from_slice(&bytes).ok()?;
+    let map = value.get("actionNameMap")?.as_object()?;
+    let mut inverse: HashMap<String, String> = HashMap::with_capacity(map.len());
+    for (pa_original, pax_safe) in map {
+        if let Some(safe) = pax_safe.as_str() {
+            inverse.insert(safe.to_string(), pa_original.clone());
+        }
+    }
+    if inverse.is_empty() {
+        None
+    } else {
+        Some(inverse)
+    }
+}
+
 /// Read `<source_dir>/pa/connectionReferences.json` if present. None when
 /// the file isn't there; an error if the file exists but doesn't parse.
 fn read_connection_references(source_dir: &Path) -> Result<Option<JsonValue>, ResolveError> {
@@ -587,6 +619,11 @@ fn read_connection_references(source_dir: &Path) -> Result<Option<JsonValue>, Re
 /// `top_level` controls whether `var` declarations are permitted. PA requires
 /// `InitializeVariable` actions at workflow scope, so nested `var` decls must
 /// be rejected at compile time. `let` / assign / pa are fine at any depth.
+///
+/// `pa_overrides`, when present, maps a pax-safe identifier (the source
+/// form of a `pa <Name>` statement) to the original PA action key it
+/// should re-emit as. Used by the round-trip path; otherwise None.
+#[allow(clippy::too_many_arguments)]
 fn resolve_statements(
     statements: &[Stmt],
     env: &mut HashMap<String, Binding>,
@@ -594,6 +631,7 @@ fn resolve_statements(
     named_scopes: &mut HashMap<String, String>,
     declared_targets: &mut HashSet<String>,
     source_dir: Option<&Path>,
+    pa_overrides: Option<&HashMap<String, String>>,
     top_level: bool,
 ) -> Result<Vec<ResolvedAction>, ResolveError> {
     let mut actions: Vec<ResolvedAction> = Vec::with_capacity(statements.len());
@@ -726,10 +764,18 @@ fn resolve_statements(
                         span: *span,
                     }
                 })?;
-                // The user-written name is the PA action key verbatim; pa
-                // actions always have a name and so are valid handler
-                // targets without opt-in syntax.
-                let action_name = unique_name(name, name_counts);
+                // The action key on emit defaults to the user-written name,
+                // but the round-trip path can override via `pa/flow.json`'s
+                // `actionNameMap` so a previously-normalized PA key
+                // (`Send_an_email_(V2)` → `Send_an_email_V2` on decode)
+                // round-trips back to its original form on emit. Handler
+                // lookup keys on the source-level identifier (the user-
+                // written `pa <name>`), not the post-override emit name.
+                let raw_name = pa_overrides
+                    .and_then(|m| m.get(name))
+                    .cloned()
+                    .unwrap_or_else(|| name.clone());
+                let action_name = unique_name(&raw_name, name_counts);
                 named_scopes.insert(name.clone(), action_name.clone());
                 (action_name, ActionKind::Pa { body_json }, *span)
             }
@@ -759,6 +805,7 @@ fn resolve_statements(
                     named_scopes,
                     declared_targets,
                     source_dir,
+                    pa_overrides,
                     false,
                 )?;
                 *env = saved_env.clone();
@@ -770,6 +817,7 @@ fn resolve_statements(
                     named_scopes,
                     declared_targets,
                     source_dir,
+                    pa_overrides,
                     false,
                 )?;
                 *env = saved_env;
@@ -810,6 +858,7 @@ fn resolve_statements(
                     named_scopes,
                     declared_targets,
                     source_dir,
+                    pa_overrides,
                     false,
                 )?;
                 *env = saved_env;
@@ -878,6 +927,7 @@ fn resolve_statements(
                     named_scopes,
                     declared_targets,
                     source_dir,
+                    pa_overrides,
                     false,
                 )?;
                 *env = saved_env;
@@ -936,6 +986,7 @@ fn resolve_statements(
                     named_scopes,
                     declared_targets,
                     source_dir,
+                    pa_overrides,
                     false,
                 )?;
                 *env = saved_env;
@@ -986,6 +1037,7 @@ fn resolve_statements(
                     named_scopes,
                     declared_targets,
                     source_dir,
+                    pa_overrides,
                     false,
                 )?;
                 *env = saved_env;
@@ -1027,6 +1079,7 @@ fn resolve_statements(
                         named_scopes,
                         declared_targets,
                         source_dir,
+                        pa_overrides,
                         false,
                     )?;
                     resolved_cases.push(ResolvedSwitchCase {
@@ -1046,6 +1099,7 @@ fn resolve_statements(
                             named_scopes,
                             declared_targets,
                             source_dir,
+                            pa_overrides,
                             false,
                         )?)
                     }
