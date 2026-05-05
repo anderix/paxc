@@ -428,16 +428,13 @@ fn build_root_manifest(
         package_guid.to_string(),
         json!({
             "type": "Microsoft.Flow/flows",
-            // paxc-emitted packages are always fresh: each compile gets a
-            // new flow GUID. Suggesting "Update" makes PA's importer try
-            // to UPDATE an existing flow (matching by some identity), which
-            // for a fresh package silently lands in a not-quite-visible
-            // state on first import and only surfaces the flow on a second
-            // pass. Suggesting "New" tells the importer to create the flow
-            // as a new entity. `creationType: "New, Update"` still lets the
-            // user override and update an existing flow if they want to.
-            "suggestedCreationType": "New",
-            "creationType": "New, Update",
+            // Default to "Update" because round-tripping an existing flow
+            // (decode → edit → re-import to overwrite) is the primary
+            // forward direction for paxc. Users importing a fresh flow can
+            // pick "Create as new" in the dialog instead. `creationType`
+            // lists the full set of options the user can choose from.
+            "suggestedCreationType": "Update",
+            "creationType": "Existing, New, Update",
             "details": {"displayName": name},
             "configurableBy": "User",
             "hierarchy": "Root",
