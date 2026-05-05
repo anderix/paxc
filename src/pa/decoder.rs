@@ -3,18 +3,23 @@
 //!
 //! Slice 44a covered the skeleton plus the variable lifecycle action types
 //! (InitializeVariable / SetVariable / IncrementVariable / DecrementVariable
-//! / AppendToStringVariable / AppendToArrayVariable). Slice 44b adds Compose
+//! / AppendToStringVariable / AppendToArrayVariable). Slice 44b added Compose
 //! → `let` lowering when the action key has shape `Compose_<identifier>`.
-//! Every other action type still falls back to `pa <Name>` plus a JSON body
-//! file, with a stderr-bound warning so the user knows what didn't decode
-//! natively. Future sub-slices (44c–44f) extend coverage to PA expression
-//! translation, container actions, on-handlers, and terminate.
+//! Slice 44c lifts the literal-only restriction on values: PA expressions
+//! (`@variables('x')`, `@add(x, 1)`, `@{outputs('Compose_y')?['field']}`,
+//! interpolated templates, etc.) are now translated to pax expression source
+//! when every node has a pax-renderable form. The translator lives in
+//! `src/pa/paexpr.rs`. Every other action type still falls back to
+//! `pa <Name>` plus a JSON body file, with a stderr-bound warning so the
+//! user knows what didn't decode natively. Future sub-slices (44d–44f)
+//! extend coverage to container actions, on-handlers, and terminate.
 //!
 //! The decoder is intentionally lossless-leaning: anything we can't faithfully
 //! represent in pax stays as a `pa <Name>` block whose body is the original
 //! action JSON byte-for-byte. Re-encoding through `paxc --target pa-legacy`
 //! reproduces the action verbatim.
 
+use crate::pa::paexpr;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -177,7 +182,10 @@ pub fn decode(input: &Value, basename: &str, out_dir: &Path) -> Result<DecodeRep
         let native = if handler_edge {
             None
         } else {
-            try_decode_native(original_key, &action_type, action_obj)
+            let ctx = paexpr::RenderCtx {
+                bindings: &native_bindings,
+            };
+            try_decode_native(original_key, &action_type, action_obj, &ctx)
                 .filter(|stmt| native_target_available(stmt, &native_bindings))
         };
 
@@ -369,24 +377,31 @@ fn is_handler_runafter(run_after: Option<&Value>) -> bool {
 
 /// One pax statement we know how to emit natively. The `pa <Name>` fallback
 /// is the caller's escape hatch when `try_decode_native` returns None.
+///
+/// The `value` fields hold already-rendered pax source (a string), produced
+/// by the `paexpr` translator. Storing the rendered form lets the decoder
+/// stay agnostic about whether the source value was a literal, a single PA
+/// accessor, a synthesized binary op, or a templated string — any of those
+/// shapes round-trips through `format!` the same way.
 #[derive(Debug, Clone)]
 enum NativeStmt {
     VarInit {
         name: String,
         ty: PaxType,
-        value: Option<PaxLiteral>,
+        /// `None` for `var x: T` no-initializer form.
+        value: Option<String>,
     },
     Assign {
         name: String,
         op: &'static str,
-        value: PaxLiteral,
+        value: String,
     },
     /// A pax `let` binding recovered from a `Compose` action. `name` is the
     /// pax-side identifier (the part after `Compose_` in the PA action key).
     /// The action key on re-encode will be `Compose_<name>` again, so this
     /// only fires when the original PA key has the `Compose_<id>` shape with
     /// `<id>` being a valid pax identifier.
-    Let { name: String, value: PaxLiteral },
+    Let { name: String, value: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -428,102 +443,17 @@ impl PaxType {
     }
 }
 
-#[derive(Debug, Clone)]
-enum PaxLiteral {
-    Null,
-    Int(i64),
-    Float(f64),
-    String(String),
-    Bool(bool),
-    EmptyArray,
-    EmptyObject,
-}
-
-impl PaxLiteral {
-    /// Try to read a JSON value as a pax literal. Returns None for anything
-    /// pax can't render in source today: PA-expression strings (`@...`),
-    /// non-empty arrays/objects, integers outside i64 range.
-    fn from_json(v: &Value) -> Option<Self> {
-        match v {
-            Value::Null => Some(PaxLiteral::Null),
-            Value::Bool(b) => Some(PaxLiteral::Bool(*b)),
-            Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    Some(PaxLiteral::Int(i))
-                } else {
-                    n.as_f64().map(PaxLiteral::Float)
-                }
-            }
-            Value::String(s) => {
-                if s.starts_with('@') {
-                    None
-                } else {
-                    Some(PaxLiteral::String(s.clone()))
-                }
-            }
-            Value::Array(items) => {
-                if items.is_empty() {
-                    Some(PaxLiteral::EmptyArray)
-                } else {
-                    None
-                }
-            }
-            Value::Object(map) => {
-                if map.is_empty() {
-                    Some(PaxLiteral::EmptyObject)
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    fn render(&self) -> String {
-        match self {
-            PaxLiteral::Null => "null".to_string(),
-            PaxLiteral::Int(n) => n.to_string(),
-            PaxLiteral::Float(x) => format_float_for_pax(*x),
-            PaxLiteral::String(s) => format!("\"{}\"", escape_pax_string(s)),
-            PaxLiteral::Bool(true) => "true".to_string(),
-            PaxLiteral::Bool(false) => "false".to_string(),
-            PaxLiteral::EmptyArray => "[]".to_string(),
-            PaxLiteral::EmptyObject => "{}".to_string(),
-        }
-    }
-}
-
-/// Pax source-form float — always at least one fractional digit so the
-/// lexer parses it as a Float, not an Int. Mirrors `pa::emitter::format_float`.
-fn format_float_for_pax(x: f64) -> String {
-    if x.is_finite() && x == x.trunc() {
-        format!("{x:.1}")
-    } else {
-        format!("{x}")
-    }
-}
-
-fn escape_pax_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 /// Returns Some(stmt) for action types we know how to natively lower. None
 /// forces fallback to `pa <Name>`. The `action_key` is needed for Compose
 /// because the let-binding name comes from the key suffix, not the inputs.
+/// The `ctx` is threaded into `paexpr::json_to_pax` so PA expression
+/// translation can resolve `variables('x')` / `outputs('Compose_y')` against
+/// the bindings already declared.
 fn try_decode_native(
     action_key: &str,
     action_type: &str,
     action: &Map<String, Value>,
+    ctx: &paexpr::RenderCtx<'_>,
 ) -> Option<NativeStmt> {
     match action_type {
         "InitializeVariable" => {
@@ -537,31 +467,16 @@ fn try_decode_native(
             let ty_str = var_entry.get("type")?.as_str()?;
             let ty = PaxType::from_pa(ty_str)?;
             let value = match var_entry.get("value") {
-                Some(v) => Some(PaxLiteral::from_json(v)?),
+                Some(v) => Some(paexpr::json_to_pax(v, ctx)?),
                 None => None,
             };
             Some(NativeStmt::VarInit { name, ty, value })
         }
-        "SetVariable" => decode_simple_assign(action, "="),
-        "IncrementVariable" => decode_numeric_assign(action, "+="),
-        "DecrementVariable" => decode_numeric_assign(action, "-="),
-        "AppendToStringVariable" => {
-            let inputs = action.get("inputs")?.as_object()?;
-            let name = inputs.get("name")?.as_str()?.to_string();
-            let raw = inputs.get("value")?;
-            // Append-to-string only natively supports literal string values.
-            // `42` (int) or `@expr` falls back.
-            let lit = match raw {
-                Value::String(s) if !s.starts_with('@') => PaxLiteral::String(s.clone()),
-                _ => return None,
-            };
-            Some(NativeStmt::Assign {
-                name,
-                op: "&=",
-                value: lit,
-            })
-        }
-        "AppendToArrayVariable" => decode_simple_assign(action, "+="),
+        "SetVariable" => decode_simple_assign(action, "=", ctx),
+        "IncrementVariable" => decode_simple_assign(action, "+=", ctx),
+        "DecrementVariable" => decode_simple_assign(action, "-=", ctx),
+        "AppendToStringVariable" => decode_simple_assign(action, "&=", ctx),
+        "AppendToArrayVariable" => decode_simple_assign(action, "+=", ctx),
         "Compose" => {
             // The pax name lives in the action key suffix: `Compose_<id>`.
             // A bare `Compose` (PA designer's default for the first one) has
@@ -569,7 +484,7 @@ fn try_decode_native(
             // valid pax identifier also falls back.
             let name = compose_let_name(action_key)?;
             let inputs = action.get("inputs")?;
-            let value = PaxLiteral::from_json(inputs)?;
+            let value = paexpr::json_to_pax(inputs, ctx)?;
             Some(NativeStmt::Let { name, value })
         }
         _ => None,
@@ -608,31 +523,25 @@ fn native_target_available(stmt: &NativeStmt, declared: &HashSet<String>) -> boo
     }
 }
 
-fn decode_simple_assign(action: &Map<String, Value>, op: &'static str) -> Option<NativeStmt> {
+fn decode_simple_assign(
+    action: &Map<String, Value>,
+    op: &'static str,
+    ctx: &paexpr::RenderCtx<'_>,
+) -> Option<NativeStmt> {
     let inputs = action.get("inputs")?.as_object()?;
     let name = inputs.get("name")?.as_str()?.to_string();
-    let value = PaxLiteral::from_json(inputs.get("value")?)?;
-    Some(NativeStmt::Assign { name, op, value })
-}
-
-fn decode_numeric_assign(action: &Map<String, Value>, op: &'static str) -> Option<NativeStmt> {
-    let inputs = action.get("inputs")?.as_object()?;
-    let name = inputs.get("name")?.as_str()?.to_string();
-    let value = match PaxLiteral::from_json(inputs.get("value")?)? {
-        v @ (PaxLiteral::Int(_) | PaxLiteral::Float(_)) => v,
-        _ => return None,
-    };
+    let value = paexpr::json_to_pax(inputs.get("value")?, ctx)?;
     Some(NativeStmt::Assign { name, op, value })
 }
 
 fn format_native_stmt(stmt: &NativeStmt) -> String {
     match stmt {
         NativeStmt::VarInit { name, ty, value } => match value {
-            Some(v) => format!("var {name}: {} = {}", ty.keyword(), v.render()),
+            Some(v) => format!("var {name}: {} = {v}", ty.keyword()),
             None => format!("var {name}: {}", ty.keyword()),
         },
-        NativeStmt::Assign { name, op, value } => format!("{name} {op} {}", value.render()),
-        NativeStmt::Let { name, value } => format!("let {name} = {}", value.render()),
+        NativeStmt::Assign { name, op, value } => format!("{name} {op} {value}"),
+        NativeStmt::Let { name, value } => format!("let {name} = {value}"),
     }
 }
 
@@ -814,11 +723,31 @@ mod tests {
     /// Test helper: pull out type + object and call try_decode_native with
     /// a placeholder action key. Tests that care about the key (Compose let
     /// extraction) call try_decode_native directly with their own key.
+    /// Bindings default to empty; tests exercising expression translation
+    /// against declared bindings use `try_decode_with_bindings` instead.
     fn try_decode(action: &Value) -> Option<NativeStmt> {
+        let bindings: HashSet<String> = HashSet::new();
+        let ctx = paexpr::RenderCtx {
+            bindings: &bindings,
+        };
         try_decode_native(
             "TestKey",
             action["type"].as_str().unwrap(),
             action.as_object().unwrap(),
+            &ctx,
+        )
+    }
+
+    fn try_decode_with_bindings(action: &Value, names: &[&str]) -> Option<NativeStmt> {
+        let bindings: HashSet<String> = names.iter().map(|s| s.to_string()).collect();
+        let ctx = paexpr::RenderCtx {
+            bindings: &bindings,
+        };
+        try_decode_native(
+            "TestKey",
+            action["type"].as_str().unwrap(),
+            action.as_object().unwrap(),
+            &ctx,
         )
     }
 
@@ -940,26 +869,58 @@ mod tests {
         assert_eq!(compose_let_name("HTTP_Call"), None);
     }
 
+    /// Compose-key-sensitive helper: callers pass the action key so the
+    /// `Compose_<id>` suffix-extraction path is exercised directly. Bindings
+    /// default to empty; tests that need declared bindings build the ctx
+    /// inline.
+    fn try_decode_compose(action_key: &str, action: &Value) -> Option<NativeStmt> {
+        let bindings: HashSet<String> = HashSet::new();
+        let ctx = paexpr::RenderCtx {
+            bindings: &bindings,
+        };
+        try_decode_native(action_key, "Compose", action.as_object().unwrap(), &ctx)
+    }
+
     #[test]
     fn native_compose_with_string_literal_lowers_to_let() {
         let action = json!({"type": "Compose", "inputs": "hello"});
-        let stmt =
-            try_decode_native("Compose_greeting", "Compose", action.as_object().unwrap()).unwrap();
+        let bindings: HashSet<String> = HashSet::new();
+        let ctx = paexpr::RenderCtx {
+            bindings: &bindings,
+        };
+        let stmt = try_decode_native(
+            "Compose_greeting",
+            "Compose",
+            action.as_object().unwrap(),
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(format_native_stmt(&stmt), "let greeting = \"hello\"");
     }
 
     #[test]
     fn native_compose_with_int_literal_lowers_to_let() {
         let action = json!({"type": "Compose", "inputs": 42});
-        let stmt =
-            try_decode_native("Compose_answer", "Compose", action.as_object().unwrap()).unwrap();
+        let bindings: HashSet<String> = HashSet::new();
+        let ctx = paexpr::RenderCtx {
+            bindings: &bindings,
+        };
+        let stmt = try_decode_native(
+            "Compose_answer",
+            "Compose",
+            action.as_object().unwrap(),
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(format_native_stmt(&stmt), "let answer = 42");
     }
 
     #[test]
     fn native_compose_falls_back_on_pa_expression_input() {
         let action = json!({"type": "Compose", "inputs": "@triggerBody()"});
-        assert!(try_decode_native("Compose_x", "Compose", action.as_object().unwrap()).is_none());
+        // triggerBody is in paexpr's forbidden-accessor list — even with
+        // expression translation enabled, this falls back.
+        assert!(try_decode_compose("Compose_x", &action).is_none());
     }
 
     #[test]
@@ -967,14 +928,26 @@ mod tests {
         // Even a literal-input Compose must fall back when the key has no
         // recoverable pax name suffix.
         let action = json!({"type": "Compose", "inputs": "ok"});
-        assert!(try_decode_native("Compose", "Compose", action.as_object().unwrap()).is_none());
+        let bindings: HashSet<String> = HashSet::new();
+        let ctx = paexpr::RenderCtx {
+            bindings: &bindings,
+        };
+        assert!(
+            try_decode_native("Compose", "Compose", action.as_object().unwrap(), &ctx).is_none()
+        );
     }
 
     #[test]
     fn native_compose_falls_back_on_non_literal_input() {
         // Non-empty arrays/objects can't be rendered in pax source.
         let action = json!({"type": "Compose", "inputs": [1, 2, 3]});
-        assert!(try_decode_native("Compose_a", "Compose", action.as_object().unwrap()).is_none());
+        let bindings: HashSet<String> = HashSet::new();
+        let ctx = paexpr::RenderCtx {
+            bindings: &bindings,
+        };
+        assert!(
+            try_decode_native("Compose_a", "Compose", action.as_object().unwrap(), &ctx).is_none()
+        );
     }
 
     // ---------- is_handler_runafter ----------
@@ -1287,9 +1260,10 @@ mod tests {
         });
         let dir = tmp_dir("handler");
         let report = decode(&input, "x", &dir).unwrap();
-        // Compose isn't natively decoded yet either, so both fall back. The
-        // important behavior here is that On_failure surfaces the
-        // handler-edge warning specifically.
+        // Both Compose actions fall back: `A` because its key has no
+        // `Compose_<id>` suffix, `On_failure` because of the handler-style
+        // runAfter. The important behavior is that the handler-edge warning
+        // surfaces specifically for `On_failure`.
         assert!(
             report
                 .warnings
@@ -1298,5 +1272,192 @@ mod tests {
             "expected handler warning, got: {:?}",
             report.warnings
         );
+    }
+
+    // ---------- 44c: PA expression translation in value slots ----------
+
+    #[test]
+    fn native_initialize_with_at_variables_translates_when_target_declared() {
+        // A `var y: int = @variables('x')` is fine when the prior actions
+        // declared x natively. The decode loop maintains the bindings set;
+        // here we check the per-action path with the bindings provided.
+        let action = json!({
+            "type": "InitializeVariable",
+            "inputs": {
+                "variables": [{ "name": "y", "type": "Integer", "value": "@variables('x')" }]
+            }
+        });
+        let stmt = try_decode_with_bindings(&action, &["x"]).unwrap();
+        assert_eq!(format_native_stmt(&stmt), "var y: int = x");
+    }
+
+    #[test]
+    fn native_initialize_falls_back_when_referenced_var_undeclared() {
+        // Same shape as above but x is unknown. The translator returns
+        // None, the decoder falls back to `pa <Name>`.
+        let action = json!({
+            "type": "InitializeVariable",
+            "inputs": {
+                "variables": [{ "name": "y", "type": "Integer", "value": "@variables('x')" }]
+            }
+        });
+        assert!(try_decode_with_bindings(&action, &[]).is_none());
+    }
+
+    #[test]
+    fn native_set_with_arithmetic_lowers_to_pax_operator() {
+        let action = json!({
+            "type": "SetVariable",
+            "inputs": { "name": "x", "value": "@add(variables('x'), 5)" }
+        });
+        let stmt = try_decode_with_bindings(&action, &["x"]).unwrap();
+        assert_eq!(format_native_stmt(&stmt), "x = (x + 5)");
+    }
+
+    #[test]
+    fn native_increment_with_variable_reference() {
+        let action = json!({
+            "type": "IncrementVariable",
+            "inputs": { "name": "n", "value": "@variables('m')" }
+        });
+        let stmt = try_decode_with_bindings(&action, &["n", "m"]).unwrap();
+        assert_eq!(format_native_stmt(&stmt), "n += m");
+    }
+
+    #[test]
+    fn native_append_to_string_with_template() {
+        let action = json!({
+            "type": "AppendToStringVariable",
+            "inputs": { "name": "msg", "value": "Hello @{variables('name')}!" }
+        });
+        let stmt = try_decode_with_bindings(&action, &["msg", "name"]).unwrap();
+        assert_eq!(
+            format_native_stmt(&stmt),
+            "msg &= (\"Hello \" & name & \"!\")"
+        );
+    }
+
+    #[test]
+    fn native_compose_with_expression_input_lowers_to_let() {
+        // `let total = (a + b)` recovered from a Compose with an `@add`
+        // expression input.
+        let action = json!({
+            "type": "Compose",
+            "inputs": "@add(variables('a'), variables('b'))"
+        });
+        let bindings: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        let ctx = paexpr::RenderCtx {
+            bindings: &bindings,
+        };
+        let stmt = try_decode_native(
+            "Compose_total",
+            "Compose",
+            action.as_object().unwrap(),
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(format_native_stmt(&stmt), "let total = (a + b)");
+    }
+
+    #[test]
+    fn decode_initialize_with_expression_round_trips_through_full_pipeline() {
+        // End-to-end: x is declared with a literal initializer (so it's in
+        // native_bindings by the time y's action is processed), then y is
+        // declared with `@variables('x')` as its initializer.
+        let input = json!({
+            "properties": {
+                "displayName": "Expr Round-Trip",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Initialize_x": {
+                            "type": "InitializeVariable",
+                            "runAfter": {},
+                            "inputs": {
+                                "variables": [{ "name": "x", "type": "Integer", "value": 5 }]
+                            }
+                        },
+                        "Initialize_y": {
+                            "type": "InitializeVariable",
+                            "runAfter": { "Initialize_x": ["Succeeded"] },
+                            "inputs": {
+                                "variables": [{ "name": "y", "type": "Integer", "value": "@variables('x')" }]
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("init_expr");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(pax.contains("var x: int = 5"), "pax was: {pax}");
+        assert!(pax.contains("var y: int = x"), "pax was: {pax}");
+        // No fallback file should have been written for either action.
+        assert!(!dir.join("pa/Initialize_x.json").exists());
+        assert!(!dir.join("pa/Initialize_y.json").exists());
+    }
+
+    #[test]
+    fn decode_compose_with_outputs_member_access_lowers_natively() {
+        // Compose_a := obj      (declares pax let `a`)
+        // Compose_b := outputs('Compose_a')?['name']   →  let b = a.name
+        let input = json!({
+            "properties": {
+                "displayName": "Compose Member",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Compose_a": {
+                            "type": "Compose",
+                            "runAfter": {},
+                            "inputs": "obj"
+                        },
+                        "Compose_b": {
+                            "type": "Compose",
+                            "runAfter": { "Compose_a": ["Succeeded"] },
+                            "inputs": "@outputs('Compose_a')?['name']"
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("compose_member");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(pax.contains("let a = \"obj\""), "pax was: {pax}");
+        assert!(pax.contains("let b = a.name"), "pax was: {pax}");
+    }
+
+    #[test]
+    fn decode_initialize_with_unknown_accessor_falls_back() {
+        // `triggerOutputs()` has no native pax form at slice 44c — the
+        // whole action falls back to a pa block.
+        let input = json!({
+            "properties": {
+                "displayName": "Trigger Accessor",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Initialize_data": {
+                            "type": "InitializeVariable",
+                            "runAfter": {},
+                            "inputs": {
+                                "variables": [{
+                                    "name": "data",
+                                    "type": "Object",
+                                    "value": "@triggerOutputs()"
+                                }]
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("trigger_accessor");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(pax.contains("pa Initialize_data"), "pax was: {pax}");
+        assert!(dir.join("pa/Initialize_data.json").exists());
     }
 }

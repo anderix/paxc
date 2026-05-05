@@ -4,7 +4,7 @@
 
 For the full language reference, see [REFERENCE.md](REFERENCE.md).
 
-3.1.0 shipped. Every construct listed in REFERENCE.md is implemented and tested, end-to-end deployment to Power Automate has been validated, and a legacy-format package target lets you import compiled flows directly through the Power Automate portal. Round-trip ingest landed in 3.1.0: `paxc --decode <flow.json>` reads an exported PA flow JSON and writes a `.pax` source file plus a `pa/` folder, so existing flows can be refactored and version-controlled without rebuilding them in the designer.
+3.3.0 shipped. Every construct listed in REFERENCE.md is implemented and tested, end-to-end deployment to Power Automate has been validated, and a legacy-format package target lets you import compiled flows directly through the Power Automate portal. Round-trip ingest landed in 3.1.0 and is incrementally widening: `paxc --decode <flow.json>` reads an exported PA flow JSON and writes a `.pax` source file plus a `pa/` folder. Variable, Compose, and `@variables(...) / @outputs(...) / @add(...)` style PA expressions natively round-trip to pax source today; container actions and on-handlers will follow.
 
 3.0.0 reflected a strategic reframing of the language: round-trip from existing PA flows is now the primary forward direction. Connector bodies, ParseJson, and any non-default trigger live in JSON files next to the source under a `pa/` folder. pax owns the programmable parts (variables, control flow, expressions); files own the PA-specific parts. The `raw{}` escape hatch and the `trigger ...` syntax are gone, replaced by the file convention.
 
