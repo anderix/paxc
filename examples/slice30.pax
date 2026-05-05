@@ -13,7 +13,6 @@
 // paxr simulates the happy path: `on succeeded` handlers fire, the others
 // are announced and skipped because paxr cannot force a PA failure.
 
-trigger manual
 
 var trail: string = ""
 

@@ -71,7 +71,6 @@ pub mod key_prefix {
 /// names like `trigger` in emitter functions.
 pub mod trigger_type {
     pub const REQUEST: &str = "Request";
-    pub const RECURRENCE: &str = "Recurrence";
 }
 
 /// Whether `name` matches a function paxc recognizes (via the central

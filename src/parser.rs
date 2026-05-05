@@ -4,8 +4,8 @@
 //! declarations and builds a `Program` AST.
 
 use crate::ast::{
-    AssignOp, BinOp, DebugArg, Expr, Frequency, HandlerStatus, Literal, Program, Stmt, SwitchCase,
-    TerminateStatus, Trigger, Type, UnaryOp,
+    AssignOp, BinOp, DebugArg, Expr, HandlerStatus, Literal, Program, Stmt, SwitchCase,
+    TerminateStatus, Type, UnaryOp,
 };
 use crate::lexer::{Span, Token};
 use chumsky::{input::ValueInput, prelude::*};
@@ -489,52 +489,14 @@ where
             .or(assign)
     });
 
-    // Unit keyword → Frequency. Singular and plural both accepted.
-    let frequency_unit = select! {
-        Token::Ident("second") => Frequency::Second,
-        Token::Ident("seconds") => Frequency::Second,
-        Token::Ident("minute") => Frequency::Minute,
-        Token::Ident("minutes") => Frequency::Minute,
-        Token::Ident("hour") => Frequency::Hour,
-        Token::Ident("hours") => Frequency::Hour,
-        Token::Ident("day") => Frequency::Day,
-        Token::Ident("days") => Frequency::Day,
-        Token::Ident("week") => Frequency::Week,
-        Token::Ident("weeks") => Frequency::Week,
-        Token::Ident("month") => Frequency::Month,
-        Token::Ident("months") => Frequency::Month,
-    }
-    .labelled("time unit (second, minute, hour, day, week, or month)");
-
-    // `every [N]? <unit>`: N defaults to 1 when omitted.
-    let schedule_body = select! { Token::Ident("every") => () }
-        .ignore_then(select! { Token::Int(n) => n }.or_not())
-        .then(frequency_unit)
-        .try_map(|(n_opt, frequency), span| {
-            let interval = n_opt.unwrap_or(1);
-            if interval < 1 {
-                return Err(Rich::custom(span, "schedule interval must be at least 1"));
-            }
-            let interval: u32 = interval.try_into().map_err(|_| {
-                Rich::custom(span, "schedule interval is too large (must fit in u32)")
-            })?;
-            Ok(Trigger::Schedule {
-                frequency,
-                interval,
-            })
-        });
-
-    let manual_body = select! { Token::Ident("manual") => Trigger::Manual };
-    let schedule_kw = select! { Token::Ident("schedule") => () }.ignore_then(schedule_body);
-
-    let trigger = just(Token::Trigger).ignore_then(manual_body.or(schedule_kw));
-
-    trigger
-        .then(stmt.repeated().collect::<Vec<_>>())
-        .map(|(trigger, statements)| Program {
-            trigger,
-            statements,
-        })
+    // Programs no longer carry a trigger statement -- the trigger is
+    // determined at resolve time by scanning the source directory's
+    // `pa/` folder for a `*.trigger.json` file (or defaulting to a
+    // generated manual trigger when none is present). The body is just
+    // a sequence of statements.
+    stmt.repeated()
+        .collect::<Vec<_>>()
+        .map(|statements| Program { statements })
 }
 
 #[cfg(test)]
@@ -543,13 +505,7 @@ mod tests {
     use crate::lexer::lexer;
 
     fn parse(src: &str) -> Program {
-        // Prepend a manual trigger so slice-specific tests can focus on their
-        // new syntax without every test having to repeat the trigger line.
-        let src = format!("trigger manual\n{src}");
-        let tokens = lexer()
-            .parse(src.as_str())
-            .into_result()
-            .expect("lex failed");
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
         parser()
             .parse(
                 tokens
@@ -604,7 +560,7 @@ mod tests {
 
     #[test]
     fn slice16_comparison_chain_is_parse_error() {
-        let src = "trigger manual\nvar a: int = 1\nlet x = a < 2 < 3";
+        let src = "var a: int = 1\nlet x = a < 2 < 3";
         let tokens = lexer().parse(src).into_result().expect("lex failed");
         let result = parser().parse(
             tokens
@@ -618,7 +574,7 @@ mod tests {
     fn slice23_if_condition_span_covers_source() {
         // paxr's verbose trace uses this span to render
         // `condition? (<source>) = true/false`.
-        let src = "trigger manual\nvar x: int = 1\nif x == 1 { x = 2 }";
+        let src = "var x: int = 1\nif x == 1 { x = 2 }";
         let tokens = lexer().parse(src).into_result().expect("lex failed");
         let prog = parser()
             .parse(
@@ -659,8 +615,7 @@ mod tests {
     fn slice20_debug_arg_span_covers_source_slice() {
         // Per-arg spans let paxr show `total - completed=<value>` rather
         // than just the evaluated number.
-        let src =
-            "trigger manual\nvar total: int = 0\nvar completed: int = 0\ndebug(total - completed)";
+        let src = "var total: int = 0\nvar completed: int = 0\ndebug(total - completed)";
         let tokens = lexer().parse(src).into_result().expect("lex failed");
         let prog = parser()
             .parse(
@@ -695,77 +650,6 @@ mod tests {
             }
             _ => panic!("expected assign"),
         }
-    }
-
-    fn parse_full(src: &str) -> Program {
-        let tokens = lexer().parse(src).into_result().expect("lex failed");
-        parser()
-            .parse(
-                tokens
-                    .as_slice()
-                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
-            )
-            .into_result()
-            .expect("parse failed")
-    }
-
-    #[test]
-    fn slice21_schedule_trigger_every_n_plural() {
-        let prog = parse_full("trigger schedule every 5 minutes");
-        assert_eq!(
-            prog.trigger,
-            Trigger::Schedule {
-                frequency: Frequency::Minute,
-                interval: 5,
-            }
-        );
-    }
-
-    #[test]
-    fn slice21_schedule_trigger_every_singular_defaults_to_one() {
-        let prog = parse_full("trigger schedule every hour");
-        assert_eq!(
-            prog.trigger,
-            Trigger::Schedule {
-                frequency: Frequency::Hour,
-                interval: 1,
-            }
-        );
-    }
-
-    #[test]
-    fn slice21_schedule_accepts_all_units() {
-        for (src, expected) in [
-            ("trigger schedule every 30 seconds", Frequency::Second),
-            ("trigger schedule every 2 days", Frequency::Day),
-            ("trigger schedule every week", Frequency::Week),
-            ("trigger schedule every 6 months", Frequency::Month),
-        ] {
-            let prog = parse_full(src);
-            match prog.trigger {
-                Trigger::Schedule { frequency, .. } => assert_eq!(frequency, expected),
-                _ => panic!("expected schedule"),
-            }
-        }
-    }
-
-    #[test]
-    fn slice21_schedule_rejects_interval_zero() {
-        let src = "trigger schedule every 0 minutes";
-        let tokens = lexer().parse(src).into_result().expect("lex failed");
-        let result = parser().parse(
-            tokens
-                .as_slice()
-                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
-        );
-        assert!(result.has_errors(), "expected parse error for interval 0");
-    }
-
-    #[test]
-    fn slice21_manual_trigger_still_parses() {
-        let prog = parse_full("trigger manual\nvar x: int = 1");
-        assert_eq!(prog.trigger, Trigger::Manual);
-        assert_eq!(prog.statements.len(), 1);
     }
 
     #[test]
@@ -823,7 +707,7 @@ mod tests {
 
     #[test]
     fn slice22_terminate_message_on_succeeded_is_parse_error() {
-        let src = "trigger manual\nterminate succeeded \"nope\"";
+        let src = "terminate succeeded \"nope\"";
         let tokens = lexer().parse(src).into_result().expect("lex failed");
         let result = parser().parse(
             tokens
@@ -907,7 +791,7 @@ mod tests {
     #[test]
     fn slice34_until_timeout_before_max_is_parse_error() {
         // Fixed order: `max` must come before `timeout` when both appear.
-        let src = "trigger manual\nvar n: int = 0\nuntil n > 5 timeout \"PT30M\" max 10 { n += 1 }";
+        let src = "var n: int = 0\nuntil n > 5 timeout \"PT30M\" max 10 { n += 1 }";
         let tokens = lexer().parse(src).into_result().expect("lex failed");
         let result = parser().parse(
             tokens
@@ -919,7 +803,7 @@ mod tests {
 
     #[test]
     fn slice29_until_condition_span_covers_source() {
-        let src = "trigger manual\nvar n: int = 0\nuntil n > 5 { n += 1 }";
+        let src = "var n: int = 0\nuntil n > 5 { n += 1 }";
         let tokens = lexer().parse(src).into_result().expect("lex failed");
         let prog = parser()
             .parse(
@@ -982,7 +866,7 @@ on failed try_work {
 
     #[test]
     fn slice30_on_handler_unknown_status_is_parse_error() {
-        let src = "trigger manual\nscope foo {}\non weird foo {\n}";
+        let src = "scope foo {}\non weird foo {\n}";
         let tokens = lexer().parse(src).into_result().expect("lex failed");
         let result = parser().parse(
             tokens
@@ -1130,7 +1014,7 @@ switch status {
     fn slice27_switch_rejects_expression_case_value() {
         // Case values must be literals, not expressions. PA enforces the
         // same constraint in its Switch action.
-        let src = "trigger manual\nvar n: int = 1\nswitch n { case 1 + 1 { } }";
+        let src = "var n: int = 1\nswitch n { case 1 + 1 { } }";
         let tokens = lexer().parse(src).into_result().expect("lex failed");
         let result = parser().parse(
             tokens
@@ -1142,7 +1026,7 @@ switch status {
 
     #[test]
     fn slice22_terminate_unknown_status_is_parse_error() {
-        let src = "trigger manual\nterminate bogus";
+        let src = "terminate bogus";
         let tokens = lexer().parse(src).into_result().expect("lex failed");
         let result = parser().parse(
             tokens

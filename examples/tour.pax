@@ -1,6 +1,5 @@
 // Canonical v1.1 tour -- every pax construct appears at least once.
 
-trigger manual
 
 // InitializeVariable with all five v1 types.
 var total: int = 0

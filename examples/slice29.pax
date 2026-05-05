@@ -10,7 +10,6 @@
 //
 // terminate inside the body halts the loop (and the whole program).
 
-trigger manual
 
 // Basic counter -- exits when n >= 3.
 var n: int = 0

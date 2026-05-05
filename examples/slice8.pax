@@ -1,4 +1,3 @@
-trigger manual
 
 var summary: string = "Daily run complete"
 var retry_count: int = 3

@@ -1,4 +1,3 @@
-trigger manual
 
 var counter: int = 1
 var tags: array = ["urgent", "review", "followup"]

@@ -5,24 +5,30 @@
 //! an `actions` map. Action keys and `runAfter` predecessors come from the
 //! resolver, so this layer is purely a tree-to-JSON translation.
 
-use crate::ast::{BinOp, Expr, Frequency, Literal, TerminateStatus, Trigger, Type, UnaryOp};
+use crate::ast::{BinOp, Expr, Literal, TerminateStatus, Type, UnaryOp};
 use crate::pa::names::{action, trigger_type};
 use crate::resolver::{
-    ActionKind, ResolvedAction, ResolvedProgram, ResolvedSwitchCase, RunAfterEntry,
+    ActionKind, ResolvedAction, ResolvedProgram, ResolvedSwitchCase, ResolvedTrigger, RunAfterEntry,
 };
 use serde_json::{Map, Value, json};
 
 const SCHEMA_URL: &str = "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#";
 
 pub fn emit(program: &ResolvedProgram) -> Value {
-    json!({
-        "definition": {
+    let mut top = Map::new();
+    top.insert(
+        "definition".to_string(),
+        json!({
             "$schema": SCHEMA_URL,
             "contentVersion": "1.0.0.0",
             "triggers": emit_trigger(&program.trigger),
             "actions": build_actions_map(&program.actions),
-        }
-    })
+        }),
+    );
+    if let Some(refs) = &program.connection_references {
+        top.insert("connectionReferences".to_string(), refs.clone());
+    }
+    Value::Object(top)
 }
 
 fn build_actions_map(actions: &[ResolvedAction]) -> Value {
@@ -79,32 +85,21 @@ pub fn count_debug_actions(actions: &[ResolvedAction]) -> usize {
     n
 }
 
-fn emit_trigger(trigger: &Trigger) -> Value {
+fn emit_trigger(trigger: &ResolvedTrigger) -> Value {
     match trigger {
-        Trigger::Manual => json!({
+        ResolvedTrigger::DefaultManual => json!({
             "manual": {
                 "type": trigger_type::REQUEST,
                 "kind": "Button",
                 "inputs": {}
             }
         }),
-        Trigger::Schedule {
-            frequency,
-            interval,
-        } => emit_schedule_trigger(*frequency, *interval),
-    }
-}
-
-fn emit_schedule_trigger(frequency: Frequency, interval: u32) -> Value {
-    json!({
-        "Recurrence": {
-            "type": trigger_type::RECURRENCE,
-            "recurrence": {
-                "frequency": frequency.as_pa_str(),
-                "interval": interval,
-            }
+        ResolvedTrigger::FromFile { name, body_json } => {
+            let mut obj = Map::new();
+            obj.insert(name.clone(), body_json.clone());
+            Value::Object(obj)
         }
-    })
+    }
 }
 
 fn emit_action(action: &ResolvedAction) -> Value {
@@ -456,11 +451,7 @@ mod tests {
     use chumsky::prelude::*;
 
     fn compile(src: &str) -> Value {
-        let src = format!("trigger manual\n{src}");
-        let tokens = lexer()
-            .parse(src.as_str())
-            .into_result()
-            .expect("lex failed");
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
         let program = parser()
             .parse(
                 tokens
@@ -837,43 +828,10 @@ msg &= "!""#,
         );
     }
 
-    fn compile_full(src: &str) -> Value {
-        let tokens = lexer().parse(src).into_result().expect("lex failed");
-        let program = parser()
-            .parse(
-                tokens
-                    .as_slice()
-                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
-            )
-            .into_result()
-            .expect("parse failed");
-        let resolved = resolve(&program, None).expect("resolve failed");
-        emit(&resolved)
-    }
-
     #[test]
-    fn slice21_schedule_trigger_emits_recurrence() {
-        let out = compile_full("trigger schedule every 5 minutes\nvar x: int = 1");
-        let trig = &out["definition"]["triggers"]["Recurrence"];
-        assert_eq!(trig["type"], "Recurrence");
-        assert_eq!(trig["recurrence"]["frequency"], "Minute");
-        assert_eq!(trig["recurrence"]["interval"], 5);
-    }
-
-    #[test]
-    fn slice21_schedule_trigger_no_manual_keys() {
-        // Ensure the trigger map does not carry over the `manual` key when
-        // a schedule is used.
-        let out = compile_full("trigger schedule every hour\nvar x: int = 1");
-        let triggers = &out["definition"]["triggers"];
-        assert!(triggers.get("manual").is_none());
-        assert!(triggers.get("Recurrence").is_some());
-    }
-
-    #[test]
-    fn slice21_manual_trigger_still_emits_manual() {
-        // Regression: existing manual-trigger behavior unchanged.
-        let out = compile_full("trigger manual\nvar x: int = 1");
+    fn default_manual_trigger_emits_when_no_trigger_file() {
+        // No source dir -> no scan -> default manual.
+        let out = compile("var x: int = 1");
         let trig = &out["definition"]["triggers"]["manual"];
         assert_eq!(trig["type"], "Request");
         assert_eq!(trig["kind"], "Button");

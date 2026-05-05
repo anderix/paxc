@@ -1,4 +1,3 @@
-trigger manual
 
 var total: int = 10
 var completed: int = 7

@@ -12,7 +12,6 @@
 // `succeeded` fires locally; without `succeeded` it's announced and skipped,
 // same as a plain `on failed` today.
 
-trigger manual
 
 var trail: string = ""
 

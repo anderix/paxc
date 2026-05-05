@@ -6,7 +6,6 @@
 // auto-labeled with its source slice, multi-arg one-line output, nested
 // inside control flow.
 
-trigger manual
 
 var total: int = 0
 var completed: int = 0

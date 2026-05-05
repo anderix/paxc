@@ -1,4 +1,3 @@
-trigger manual
 
 var multiline: string = "line one\nline two"
 var tabbed: string = "col1\tcol2"

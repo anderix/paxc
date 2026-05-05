@@ -1,4 +1,3 @@
-trigger manual
 
 var config: object = {
   "region": "us-east",

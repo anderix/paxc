@@ -12,7 +12,7 @@
 //! action key), so the emitter never sees an unresolved reference.
 
 use crate::ast::{
-    AssignOp, DebugArg, Expr, HandlerStatus, Literal, Program, Stmt, TerminateStatus, Trigger, Type,
+    AssignOp, DebugArg, Expr, HandlerStatus, Literal, Program, Stmt, TerminateStatus, Type,
 };
 use crate::lexer::Span;
 use crate::pa::names::{key_prefix, status};
@@ -23,8 +23,27 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedProgram {
-    pub trigger: Trigger,
+    pub trigger: ResolvedTrigger,
+    /// Top-level connection references read from `pa/connectionReferences.json`
+    /// when present. Emitted alongside the flow definition; consumed by the
+    /// packager when wrapping the flow envelope. None when no file is present.
+    pub connection_references: Option<JsonValue>,
     pub actions: Vec<ResolvedAction>,
+}
+
+/// The flow's trigger, determined at resolve time by scanning the source
+/// directory's `pa/` folder for a `*.trigger.json` file. With no trigger
+/// file present, paxc generates a default manual ("Button") trigger so a
+/// freshly-written pax program is always runnable without any boilerplate.
+#[derive(Debug, Clone)]
+pub enum ResolvedTrigger {
+    /// No trigger file was found (or no source dir was provided to the
+    /// resolver). The emitter generates a `manual` Button trigger.
+    DefaultManual,
+    /// A `pa/<name>.trigger.json` file was found. `name` is the filename
+    /// without the `.trigger.json` suffix and becomes the PA trigger key.
+    /// `body_json` is the parsed file contents -- emitted verbatim.
+    FromFile { name: String, body_json: JsonValue },
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +297,18 @@ pub enum ResolveError {
         message: String,
         span: Span,
     },
+    /// The source directory's `pa/` folder couldn't be read while scanning
+    /// for trigger or connection-reference files.
+    PaDirReadError {
+        path: PathBuf,
+        message: String,
+    },
+    /// More than one `*.trigger.json` file was found under `pa/`. PA flows
+    /// can only have one trigger, so paxc rejects this rather than picking
+    /// arbitrarily.
+    MultipleTriggerFiles {
+        names: Vec<String>,
+    },
 }
 
 impl ResolveError {
@@ -295,6 +326,9 @@ impl ResolveError {
             | ResolveError::PaSourceDirRequired { span, .. }
             | ResolveError::PaFileNotFound { span, .. }
             | ResolveError::PaFileInvalidJson { span, .. } => *span,
+            ResolveError::PaDirReadError { .. } | ResolveError::MultipleTriggerFiles { .. } => {
+                (0..0).into()
+            }
         }
     }
 
@@ -313,6 +347,8 @@ impl ResolveError {
             ResolveError::PaSourceDirRequired { .. } => "no source directory",
             ResolveError::PaFileNotFound { .. } => "file not found",
             ResolveError::PaFileInvalidJson { .. } => "invalid JSON",
+            ResolveError::PaDirReadError { .. } => "pa directory unreadable",
+            ResolveError::MultipleTriggerFiles { .. } => "multiple triggers",
         }
     }
 }
@@ -398,6 +434,16 @@ impl fmt::Display for ResolveError {
                     path.display()
                 )
             }
+            ResolveError::PaDirReadError { path, message } => {
+                write!(f, "could not read `{}`: {message}", path.display())
+            }
+            ResolveError::MultipleTriggerFiles { names } => {
+                write!(
+                    f,
+                    "found multiple `*.trigger.json` files under `pa/` ({}); a flow can only have one trigger",
+                    names.join(", ")
+                )
+            }
         }
     }
 }
@@ -451,10 +497,88 @@ pub fn resolve(
         source_dir,
         true,
     )?;
+    let trigger = match source_dir {
+        Some(dir) => discover_trigger(dir)?,
+        None => ResolvedTrigger::DefaultManual,
+    };
+    let connection_references = match source_dir {
+        Some(dir) => read_connection_references(dir)?,
+        None => None,
+    };
     Ok(ResolvedProgram {
-        trigger: program.trigger.clone(),
+        trigger,
+        connection_references,
         actions,
     })
+}
+
+/// Scan `<source_dir>/pa/` for a single `*.trigger.json` file. Zero files
+/// means default manual. Two or more is a resolver error -- a flow can
+/// only have one trigger.
+fn discover_trigger(source_dir: &Path) -> Result<ResolvedTrigger, ResolveError> {
+    let pa_dir = source_dir.join("pa");
+    if !pa_dir.is_dir() {
+        return Ok(ResolvedTrigger::DefaultManual);
+    }
+    let entries = std::fs::read_dir(&pa_dir).map_err(|err| ResolveError::PaDirReadError {
+        path: pa_dir.clone(),
+        message: err.to_string(),
+    })?;
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if let Some(stripped) = file_name.strip_suffix(".trigger.json") {
+            found.push((stripped.to_string(), path));
+        }
+    }
+    match found.len() {
+        0 => Ok(ResolvedTrigger::DefaultManual),
+        1 => {
+            let (name, path) = found.into_iter().next().unwrap();
+            let bytes = std::fs::read(&path).map_err(|_| ResolveError::PaFileNotFound {
+                name: name.clone(),
+                path: path.clone(),
+                span: (0..0).into(),
+            })?;
+            let body_json: JsonValue =
+                serde_json::from_slice(&bytes).map_err(|err| ResolveError::PaFileInvalidJson {
+                    name: name.clone(),
+                    path: path.clone(),
+                    message: err.to_string(),
+                    span: (0..0).into(),
+                })?;
+            Ok(ResolvedTrigger::FromFile { name, body_json })
+        }
+        _ => {
+            let mut names: Vec<String> = found.into_iter().map(|(n, _)| n).collect();
+            names.sort();
+            Err(ResolveError::MultipleTriggerFiles { names })
+        }
+    }
+}
+
+/// Read `<source_dir>/pa/connectionReferences.json` if present. None when
+/// the file isn't there; an error if the file exists but doesn't parse.
+fn read_connection_references(source_dir: &Path) -> Result<Option<JsonValue>, ResolveError> {
+    let path = source_dir.join("pa").join("connectionReferences.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path).map_err(|err| ResolveError::PaDirReadError {
+        path: path.clone(),
+        message: err.to_string(),
+    })?;
+    let value: JsonValue =
+        serde_json::from_slice(&bytes).map_err(|err| ResolveError::PaFileInvalidJson {
+            name: "connectionReferences".to_string(),
+            path: path.clone(),
+            message: err.to_string(),
+            span: (0..0).into(),
+        })?;
+    Ok(Some(value))
 }
 
 /// `top_level` controls whether `var` declarations are permitted. PA requires
@@ -1142,20 +1266,16 @@ fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Literal, Trigger, Type};
+    use crate::ast::{Literal, Type};
     use crate::lexer::lexer;
     use crate::parser::parser;
     use chumsky::prelude::*;
 
     /// Drive a pax source string all the way through lex + parse + resolve
     /// so a test can observe resolve errors that originate in concrete
-    /// syntax. Prepends the manual trigger so shorter snippets remain valid.
+    /// syntax.
     fn resolve_source(src: &str) -> Result<ResolvedProgram, ResolveError> {
-        let src = format!("trigger manual\n{src}");
-        let tokens = lexer()
-            .parse(src.as_str())
-            .into_result()
-            .expect("lex failed");
+        let tokens = lexer().parse(src).into_result().expect("lex failed");
         let program = parser()
             .parse(
                 tokens
@@ -1238,7 +1358,6 @@ mod tests {
     fn slice20_debug_does_not_chain_run_after() {
         // var a; debug(); var b --  b.runAfter must point at a, not at debug.
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![var("a"), debug(vec![]), var("b")],
         };
         let resolved = resolve(&prog, None).expect("resolve should succeed");
@@ -1262,7 +1381,6 @@ mod tests {
     #[test]
     fn chains_in_source_order() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![var("a"), var("b"), var("c")],
         };
         let resolved = resolve(&prog, None).expect("resolve should succeed");
@@ -1278,7 +1396,6 @@ mod tests {
     #[test]
     fn rejects_duplicate_variable() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![var("x"), var("x")],
         };
         assert!(matches!(
@@ -1296,7 +1413,6 @@ mod tests {
             value: rref("x"),
         };
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![var("x"), ref_y],
         };
         assert!(resolve(&prog, None).is_ok());
@@ -1311,7 +1427,6 @@ mod tests {
             value: rref("nope"),
         };
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![ref_y],
         };
         assert!(matches!(
@@ -1329,7 +1444,6 @@ mod tests {
             value: rref("x"),
         };
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![ref_y, var("x")],
         };
         assert!(matches!(
@@ -1341,7 +1455,6 @@ mod tests {
     #[test]
     fn set_on_any_type() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("x", Type::Bool),
                 assign("x", AssignOp::Set, Expr::Literal(Literal::Bool(true))),
@@ -1364,7 +1477,6 @@ mod tests {
         ];
         for (ty, expected_name) in cases {
             let prog = Program {
-                trigger: Trigger::Manual,
                 statements: vec![
                     var_ty("x", ty.clone()),
                     assign("x", AssignOp::Add, Expr::Literal(Literal::Int(1))),
@@ -1379,7 +1491,6 @@ mod tests {
     fn add_rejects_string_bool_and_object() {
         for ty in [Type::String, Type::Bool, Type::Object] {
             let prog = Program {
-                trigger: Trigger::Manual,
                 statements: vec![
                     var_ty("x", ty.clone()),
                     assign("x", AssignOp::Add, Expr::Literal(Literal::Int(1))),
@@ -1395,7 +1506,6 @@ mod tests {
     #[test]
     fn concat_assign_dispatches_to_string_append() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("msg", Type::String),
                 assign(
@@ -1423,7 +1533,6 @@ mod tests {
             Type::Object,
         ] {
             let prog = Program {
-                trigger: Trigger::Manual,
                 statements: vec![
                     var_ty("x", ty.clone()),
                     assign(
@@ -1444,7 +1553,6 @@ mod tests {
     fn subtract_only_on_numeric() {
         // String rejected; Int and Float accepted.
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("x", Type::String),
                 assign("x", AssignOp::Subtract, Expr::Literal(Literal::Int(1))),
@@ -1456,7 +1564,6 @@ mod tests {
         ));
         for ty in [Type::Int, Type::Float] {
             let prog = Program {
-                trigger: Trigger::Manual,
                 statements: vec![
                     var_ty("x", ty),
                     assign("x", AssignOp::Subtract, Expr::Literal(Literal::Int(1))),
@@ -1470,7 +1577,6 @@ mod tests {
     #[test]
     fn assign_to_undefined_is_error() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![assign(
                 "nope",
                 AssignOp::Set,
@@ -1486,7 +1592,6 @@ mod tests {
     #[test]
     fn auto_suffix_follows_zero_indexed_convention() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("x", Type::Int),
                 assign("x", AssignOp::Add, Expr::Literal(Literal::Int(1))),
@@ -1503,7 +1608,6 @@ mod tests {
     #[test]
     fn let_becomes_compose_action() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![let_stmt("doubled", Expr::Literal(Literal::Int(42)))],
         };
         let resolved = resolve(&prog, None).unwrap();
@@ -1517,7 +1621,6 @@ mod tests {
     #[test]
     fn let_is_referenced_as_compose_output() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 let_stmt("total", Expr::Literal(Literal::Int(10))),
                 Stmt::VarDecl {
@@ -1543,7 +1646,6 @@ mod tests {
     #[test]
     fn cannot_assign_to_let() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 let_stmt("immut", Expr::Literal(Literal::Int(1))),
                 assign("immut", AssignOp::Set, Expr::Literal(Literal::Int(2))),
@@ -1558,7 +1660,6 @@ mod tests {
     #[test]
     fn nested_var_decl_in_if_branch_is_error() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("flag", Type::Bool),
                 Stmt::If {
@@ -1578,7 +1679,6 @@ mod tests {
     #[test]
     fn nested_var_decl_in_foreach_body_is_error() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("items", Type::Array),
                 Stmt::Foreach {
@@ -1598,7 +1698,6 @@ mod tests {
     #[test]
     fn let_in_if_branch_does_not_leak_to_outer_scope() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("flag", Type::Bool),
                 Stmt::If {
@@ -1621,7 +1720,6 @@ mod tests {
     #[test]
     fn let_in_true_branch_does_not_leak_to_false_branch() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("flag", Type::Bool),
                 Stmt::If {
@@ -1641,7 +1739,6 @@ mod tests {
     #[test]
     fn let_in_foreach_body_does_not_leak_to_outer_scope() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("items", Type::Array),
                 Stmt::Foreach {
@@ -1664,7 +1761,6 @@ mod tests {
         // Regression guard: scoping a nested `let` must not break its ability
         // to see outer-scope declarations.
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("outer", Type::Int),
                 Stmt::If {
@@ -1681,7 +1777,6 @@ mod tests {
     #[test]
     fn slice30_on_handler_resolves_target_to_action_name() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 Stmt::Scope {
                     name: Some("try_work".to_string()),
@@ -1726,7 +1821,6 @@ mod tests {
     #[test]
     fn slice30_unknown_handler_target_errors() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![Stmt::OnHandler {
                 statuses: vec![HandlerStatus::Failed],
                 target: "nope".to_string(),
@@ -1749,7 +1843,6 @@ mod tests {
         // leak would emit an `on` handler at workflow root pointing at a
         // Scope action nested inside the Condition -- invalid PA graph.
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("flag", Type::Bool),
                 Stmt::If {
@@ -1784,7 +1877,6 @@ mod tests {
         // visible to siblings within a block; they're rolled back only at
         // the end of the enclosing block.
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![Stmt::Scope {
                 name: Some("outer".to_string()),
                 body: vec![
@@ -1816,7 +1908,6 @@ mod tests {
         // action's runAfter. The next action chains back to the scope (the
         // last real action on the main path).
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 Stmt::Scope {
                     name: Some("work".to_string()),
@@ -1845,7 +1936,6 @@ mod tests {
     #[test]
     fn slice32_multi_status_handler_joins_statuses_in_runafter() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 Stmt::Scope {
                     name: Some("try_work".to_string()),
@@ -1887,7 +1977,6 @@ mod tests {
     #[test]
     fn slice35_duplicate_scope_name_is_resolve_error() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 Stmt::Scope {
                     name: Some("work".to_string()),
@@ -1910,7 +1999,6 @@ mod tests {
     #[test]
     fn slice35_duplicate_pa_name_is_resolve_error() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 Stmt::Pa {
                     name: "HTTP_Call".to_string(),
@@ -1935,7 +2023,6 @@ mod tests {
         // `scope foo` followed by `pa foo` also collides -- both are
         // handler targets and share one name registry.
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 Stmt::Scope {
                     name: Some("foo".to_string()),
@@ -1960,7 +2047,6 @@ mod tests {
         // Anonymous `scope { }` doesn't register in the handler-target map,
         // so multiple anonymous scopes remain fine.
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 Stmt::Scope {
                     name: None,
@@ -1985,7 +2071,6 @@ mod tests {
         // the mental model simple: every named handler target is unique in
         // the source text.
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("flag", Type::Bool),
                 Stmt::If {
@@ -2018,7 +2103,6 @@ mod tests {
         // outer duplicate slip through. With the permanent
         // `declared_targets` set it's correctly rejected.
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("flag", Type::Bool),
                 Stmt::If {
@@ -2047,7 +2131,6 @@ mod tests {
     #[test]
     fn slice34_until_max_zero_is_resolve_error() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![Stmt::Until {
                 condition: Expr::Literal(Literal::Bool(false)),
                 condition_span: sp(),
@@ -2084,7 +2167,6 @@ mod tests {
     #[test]
     fn slice34_until_max_negative_is_resolve_error() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![Stmt::Until {
                 condition: Expr::Literal(Literal::Bool(false)),
                 condition_span: sp(),
@@ -2104,7 +2186,6 @@ mod tests {
     #[test]
     fn slice33_on_handler_targets_a_pa_action() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 Stmt::Pa {
                     name: "HTTP_Call".to_string(),
@@ -2140,7 +2221,6 @@ mod tests {
     #[test]
     fn slice33_unknown_handler_target_error_mentions_pa_too() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![Stmt::OnHandler {
                 statuses: vec![HandlerStatus::Failed],
                 target: "nope".to_string(),
@@ -2160,7 +2240,6 @@ mod tests {
     #[test]
     fn slice32_duplicate_handler_status_errors() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 Stmt::Scope {
                     name: Some("try_work".to_string()),
@@ -2186,7 +2265,6 @@ mod tests {
     #[test]
     fn slice28_scope_unnamed_gets_bare_action_key() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![Stmt::Scope {
                 name: None,
                 body: vec![],
@@ -2201,7 +2279,6 @@ mod tests {
     #[test]
     fn slice28_scope_named_keys_by_name() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![Stmt::Scope {
                 name: Some("try_api".to_string()),
                 body: vec![],
@@ -2216,7 +2293,6 @@ mod tests {
     fn slice28_scope_nested_var_decl_is_error() {
         // Like if/foreach, Scope bodies reject nested `var`.
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![Stmt::Scope {
                 name: None,
                 body: vec![var("inner")],
@@ -2232,7 +2308,6 @@ mod tests {
     #[test]
     fn slice28_scope_let_does_not_leak() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 Stmt::Scope {
                     name: None,
@@ -2253,7 +2328,6 @@ mod tests {
         // Multiple cases should get auto-suffixed action names via the shared
         // name counter, parallel to PA's Case / Case_1 convention.
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("status", Type::String),
                 Stmt::Switch {
@@ -2291,7 +2365,6 @@ mod tests {
     fn slice27_switch_nested_var_decl_is_error() {
         // `var` in a case body must be rejected like in if/foreach bodies.
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("status", Type::String),
                 Stmt::Switch {
@@ -2318,7 +2391,6 @@ mod tests {
         // Regression: per-case `let` bindings must scope to their own branch,
         // paralleling if-branch scoping.
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![
                 var_ty("status", Type::String),
                 Stmt::Switch {
@@ -2344,7 +2416,6 @@ mod tests {
     #[test]
     fn var_and_let_share_namespace() {
         let prog = Program {
-            trigger: Trigger::Manual,
             statements: vec![var("x"), let_stmt("x", Expr::Literal(Literal::Int(1)))],
         };
         assert!(matches!(
@@ -2373,7 +2444,7 @@ mod tests {
         match value {
             Expr::VarRef { name, span } => {
                 assert_eq!(name, "total");
-                let prefix = "trigger manual\nvar total: int = 5\nvar mirror: int = ";
+                let prefix = "var total: int = 5\nvar mirror: int = ";
                 let expected_start = prefix.len();
                 assert_eq!(span.start, expected_start);
                 assert_eq!(span.end, expected_start + "total".len());
@@ -2390,7 +2461,7 @@ mod tests {
         match value {
             Expr::ComposeRef { action_name, span } => {
                 assert_eq!(action_name, "Compose_total");
-                let prefix = "trigger manual\nlet total = 5\nvar mirror: int = ";
+                let prefix = "let total = 5\nvar mirror: int = ";
                 let expected_start = prefix.len();
                 assert_eq!(span.start, expected_start);
                 assert_eq!(span.end, expected_start + "total".len());

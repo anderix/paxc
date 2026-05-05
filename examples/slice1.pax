@@ -1,3 +1,2 @@
-trigger manual
 
 var counter: int = 1

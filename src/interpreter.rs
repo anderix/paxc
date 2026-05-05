@@ -897,18 +897,17 @@ mod tests {
     use chumsky::prelude::*;
 
     fn run(src: &str) -> Result<FinalState, InterpretError> {
-        let full = format!("trigger manual\n{src}");
-        let tokens = lexer::lexer().parse(full.as_str()).into_result().unwrap();
+        let tokens = lexer::lexer().parse(src).into_result().unwrap();
         let program = parser::parser()
             .parse(
                 tokens
                     .as_slice()
-                    .map((full.len()..full.len()).into(), |(t, s)| (t, s)),
+                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
             )
             .into_result()
             .unwrap();
         let resolved = resolver::resolve(&program, None).unwrap();
-        interpret(&full, &resolved)
+        interpret(src, &resolved)
     }
 
     #[test]

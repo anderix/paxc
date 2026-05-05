@@ -1,0 +1,7 @@
+{
+    "type": "Recurrence",
+    "recurrence": {
+        "frequency": "Minute",
+        "interval": 5
+    }
+}

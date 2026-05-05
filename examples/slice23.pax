@@ -15,7 +15,6 @@
 // indexOf/lastIndexOf/startsWith/endsWith are case-insensitive (PA quirk).
 // String contains is case-sensitive.
 
-trigger manual
 
 // Text
 let greeting = trim("  hello world  ")

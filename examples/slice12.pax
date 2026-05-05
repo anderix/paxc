@@ -1,4 +1,3 @@
-trigger manual
 
 var tasks: array = [
   { "title": "Buy groceries", "done": true  },

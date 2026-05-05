@@ -8,7 +8,6 @@
 // same constraint. If no case matches and there's no default, the switch
 // is a no-op.
 
-trigger manual
 
 var status: string = "active"
 var tag: string = ""

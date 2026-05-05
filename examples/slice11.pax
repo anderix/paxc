@@ -1,4 +1,3 @@
-trigger manual
 
 var flag: bool = true
 var counter: int = 0

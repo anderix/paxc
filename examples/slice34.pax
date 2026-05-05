@@ -12,7 +12,6 @@
 //
 // Fixed order: `max` first, `timeout` second when both appear.
 
-trigger manual
 
 // Short-polling scenario: check status up to 5 times, 10 minutes total.
 // paxr respects `max 5`, so simulation caps at 5 iterations with a

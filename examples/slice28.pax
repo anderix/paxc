@@ -11,7 +11,6 @@
 // Scopes become interesting in the next slice when error-path runAfter
 // lets you attach failure handlers to them.
 
-trigger manual
 
 var counter: int = 0
 var message: string = ""

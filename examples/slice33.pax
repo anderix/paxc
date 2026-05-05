@@ -9,7 +9,6 @@
 // "action that can fail" in pax is a connector call (HTTP, SharePoint,
 // Outlook), and those live in pa/<Name>.json files. Handlers attach by name.
 
-trigger manual
 
 var outcome: string = ""
 

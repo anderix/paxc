@@ -8,7 +8,6 @@ use crate::lexer::Span;
 
 #[derive(Debug, Clone)]
 pub struct Program {
-    pub trigger: Trigger,
     pub statements: Vec<Stmt>,
 }
 
@@ -19,36 +18,6 @@ pub struct Program {
 pub struct DebugArg {
     pub expr: Expr,
     pub span: Span,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Trigger {
-    Manual,
-    Schedule { frequency: Frequency, interval: u32 },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Frequency {
-    Second,
-    Minute,
-    Hour,
-    Day,
-    Week,
-    Month,
-}
-
-impl Frequency {
-    /// PA's canonical capitalization for the `frequency` field value.
-    pub fn as_pa_str(self) -> &'static str {
-        match self {
-            Frequency::Second => "Second",
-            Frequency::Minute => "Minute",
-            Frequency::Hour => "Hour",
-            Frequency::Day => "Day",
-            Frequency::Week => "Week",
-            Frequency::Month => "Month",
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

@@ -5,7 +5,6 @@
 // paxc emits a PA Terminate action (type "Terminate"); paxr halts
 // execution and prints a one-line notice.
 
-trigger manual
 
 var queue_size: int = 0
 var processed: int = 0

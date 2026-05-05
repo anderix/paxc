@@ -12,7 +12,6 @@
 // This diverges from PA's strict JToken equality; it's a paxr happy-path
 // convenience, not a spec guarantee.
 
-trigger manual
 
 // Plain float, with arithmetic.
 var rate: float = 1.5
