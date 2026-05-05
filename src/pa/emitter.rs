@@ -284,6 +284,27 @@ fn is_boolean_expr(expr: &Expr) -> bool {
         Expr::UnaryOp {
             op: UnaryOp::Not, ..
         } => true,
+        // PA functions whose return type is boolean. Recognizing them here
+        // skips paxc's defensive `equals(_, true)` wrap on If conditions
+        // that go through one of these calls -- which happens any time a
+        // PA designer-style structured-object condition (and/or/equals)
+        // round-trips through pax via `paexpr::condition_value_to_pax`.
+        Expr::Call { name, .. } => matches!(
+            name.as_str(),
+            "and"
+                | "or"
+                | "not"
+                | "equals"
+                | "less"
+                | "lessOrEquals"
+                | "greater"
+                | "greaterOrEquals"
+                | "contains"
+                | "startsWith"
+                | "endsWith"
+                | "empty"
+                | "bool"
+        ),
         _ => false,
     }
 }
@@ -764,11 +785,26 @@ let n = length(concat("x", "y"))"#,
 if empty(items) {
 }"#,
         );
-        // Bare call result — we don't know its type, so auto-wrap kicks in.
+        // Slice 45a polish: PA functions with boolean return type
+        // (`empty`, `and`, `equals`, etc.) skip the defensive
+        // `equals(_, true)` wrap.
+        let cond = &out["definition"]["actions"]["Condition"]["expression"];
+        assert_eq!(cond.as_str().unwrap(), "@empty(variables('items'))");
+    }
+
+    #[test]
+    fn slice45a_call_with_unknown_return_type_still_wraps() {
+        // Calls whose name isn't on the boolean-return allowlist still
+        // get the conservative wrap so PA gets a real boolean shape.
+        let out = compile(
+            r#"var items: array = []
+if length(items) {
+}"#,
+        );
         let cond = &out["definition"]["actions"]["Condition"]["expression"];
         assert_eq!(
             cond.as_str().unwrap(),
-            "@equals(empty(variables('items')), true)"
+            "@equals(length(variables('items')), true)"
         );
     }
 
