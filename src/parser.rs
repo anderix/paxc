@@ -4,8 +4,8 @@
 //! declarations and builds a `Program` AST.
 
 use crate::ast::{
-    AssignOp, BinOp, DebugArg, Expr, HandlerStatus, Literal, Program, Stmt, SwitchCase,
-    TerminateStatus, Type, UnaryOp,
+    AssignOp, BinOp, DebugArg, Expr, HandlerStatus, Literal, Program, Stmt, SubscriptKey,
+    SwitchCase, TerminateStatus, Type, UnaryOp,
 };
 use crate::lexer::{Span, Token};
 use chumsky::{input::ValueInput, prelude::*};
@@ -87,11 +87,34 @@ where
                 None => Expr::Ref { name, span },
             });
 
-        let field = just(Token::Dot).ignore_then(ident_s);
+        // Path postfix: `.IDENT` (Member) or `?[<literal>]` (Subscript).
+        // Both fold left-associatively onto the same path seed so chains like
+        // `triggerBody()?['user']?['name']` and `obj.a?[0].b` work uniformly.
+        enum PathTail {
+            Field(String),
+            Sub(SubscriptKey),
+        }
+        let field_tail = just(Token::Dot).ignore_then(ident_s).map(PathTail::Field);
+        let subscript_key = select! {
+            Token::Str(s) => SubscriptKey::String(s),
+            Token::Int(n) => SubscriptKey::Index(n),
+        };
+        let subscript_tail = just(Token::Question)
+            .ignore_then(just(Token::LBracket))
+            .ignore_then(subscript_key)
+            .then_ignore(just(Token::RBracket))
+            .map(PathTail::Sub);
+        let path_tail = field_tail.or(subscript_tail);
 
-        let ref_path = path_seed.foldl(field.repeated(), |target, field| Expr::Member {
-            target: Box::new(target),
-            field,
+        let ref_path = path_seed.foldl(path_tail.repeated(), |target, tail| match tail {
+            PathTail::Field(field) => Expr::Member {
+                target: Box::new(target),
+                field,
+            },
+            PathTail::Sub(key) => Expr::Subscript {
+                target: Box::new(target),
+                key,
+            },
         });
 
         // Parenthesized subexpression. Lets the source disambiguate
@@ -557,6 +580,51 @@ mod tests {
                 assert!(value.is_none());
             }
             _ => panic!("expected var decl"),
+        }
+    }
+
+    #[test]
+    fn slice45a_subscript_string_key_parses() {
+        let prog = parse(r#"let raw = obj?["body/email"]"#);
+        match &prog.statements[0] {
+            Stmt::Let { value, .. } => match value {
+                Expr::Subscript { target, key } => {
+                    assert!(matches!(target.as_ref(), Expr::Ref { name, .. } if name == "obj"));
+                    assert!(matches!(key, SubscriptKey::String(s) if s == "body/email"));
+                }
+                other => panic!("expected subscript, got {other:?}"),
+            },
+            _ => panic!("expected let"),
+        }
+    }
+
+    #[test]
+    fn slice45a_subscript_int_key_parses() {
+        let prog = parse("let first = arr?[0]");
+        match &prog.statements[0] {
+            Stmt::Let { value, .. } => match value {
+                Expr::Subscript { key, .. } => {
+                    assert!(matches!(key, SubscriptKey::Index(0)));
+                }
+                other => panic!("expected subscript, got {other:?}"),
+            },
+            _ => panic!("expected let"),
+        }
+    }
+
+    #[test]
+    fn slice45a_subscript_chains_with_dot_and_call() {
+        // triggerBody() ?["body/email"] . local
+        let prog = parse(r#"let v = triggerBody()?["body/email"].local"#);
+        match &prog.statements[0] {
+            Stmt::Let { value, .. } => match value {
+                Expr::Member { target, field } => {
+                    assert_eq!(field, "local");
+                    assert!(matches!(target.as_ref(), Expr::Subscript { .. }));
+                }
+                other => panic!("expected outer member, got {other:?}"),
+            },
+            _ => panic!("expected let"),
         }
     }
 

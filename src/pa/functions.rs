@@ -303,6 +303,54 @@ pub static FUNCTIONS: &[FunctionDef] = &[
         arity: Arity::AtLeast(0),
         paxr_eval: None,
     },
+    // PA accessors -- recognized so the decoder can emit them as call forms
+    // and the resolver's hints work, but paxr can't simulate them locally
+    // (no trigger / connector context). Standard skip-notice on evaluation.
+    // `iterationIndexes` is dispatched specially in the interpreter and
+    // never reaches the registry's `paxr_eval` slot, so `None` is correct.
+    FunctionDef {
+        name: "triggerBody",
+        arity: Arity::Exact(0),
+        paxr_eval: None,
+    },
+    FunctionDef {
+        name: "triggerOutputs",
+        arity: Arity::Exact(0),
+        paxr_eval: None,
+    },
+    FunctionDef {
+        name: "trigger",
+        arity: Arity::Exact(0),
+        paxr_eval: None,
+    },
+    FunctionDef {
+        name: "parameters",
+        arity: Arity::Exact(1),
+        paxr_eval: None,
+    },
+    FunctionDef {
+        name: "body",
+        arity: Arity::Exact(1),
+        paxr_eval: None,
+    },
+    FunctionDef {
+        name: "actions",
+        arity: Arity::Exact(1),
+        paxr_eval: None,
+    },
+    FunctionDef {
+        name: "iterationIndexes",
+        arity: Arity::Exact(1),
+        paxr_eval: None,
+    },
+    // Singular `item()` is PA's no-arg form for "current foreach element".
+    // Decoder emits it as a generic call; future slices may collapse it to
+    // the surrounding iterator's pax name.
+    FunctionDef {
+        name: "item",
+        arity: Arity::Exact(0),
+        paxr_eval: None,
+    },
 ];
 
 /// Linear lookup. Fine at this scale.

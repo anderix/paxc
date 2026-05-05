@@ -60,6 +60,7 @@ pub enum Token<'src> {
     RBrace,
     LParen,
     RParen,
+    Question,
 }
 
 impl fmt::Display for Token<'_> {
@@ -113,6 +114,7 @@ impl fmt::Display for Token<'_> {
             Token::RBrace => f.write_str("`}`"),
             Token::LParen => f.write_str("`(`"),
             Token::RParen => f.write_str("`)`"),
+            Token::Question => f.write_str("`?`"),
         }
     }
 }
@@ -177,6 +179,7 @@ pub fn lexer<'src>()
         just('}').to(Token::RBrace),
         just('(').to(Token::LParen),
         just(')').to(Token::RParen),
+        just('?').to(Token::Question),
     ));
 
     let ident = text::ascii::ident().map(|s: &str| match s {
@@ -317,6 +320,30 @@ mod tests {
         assert_eq!(
             lex(r#""a\nb\tc\"d\\e\re""#),
             vec![Token::Str("a\nb\tc\"d\\e\re".to_string())]
+        );
+    }
+
+    #[test]
+    fn slice45a_question_subscript() {
+        assert_eq!(
+            lex(r#"obj?["key"]"#),
+            vec![
+                Token::Ident("obj"),
+                Token::Question,
+                Token::LBracket,
+                Token::Str("key".to_string()),
+                Token::RBracket,
+            ]
+        );
+        assert_eq!(
+            lex("arr?[0]"),
+            vec![
+                Token::Ident("arr"),
+                Token::Question,
+                Token::LBracket,
+                Token::Int(0),
+                Token::RBracket,
+            ]
         );
     }
 

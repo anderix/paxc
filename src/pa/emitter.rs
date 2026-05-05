@@ -5,7 +5,7 @@
 //! an `actions` map. Action keys and `runAfter` predecessors come from the
 //! resolver, so this layer is purely a tree-to-JSON translation.
 
-use crate::ast::{BinOp, Expr, Literal, TerminateStatus, Type, UnaryOp};
+use crate::ast::{BinOp, Expr, Literal, SubscriptKey, TerminateStatus, Type, UnaryOp};
 use crate::pa::names::{action, trigger_type};
 use crate::resolver::{
     ActionKind, ResolvedAction, ResolvedProgram, ResolvedSwitchCase, ResolvedTrigger, RunAfterEntry,
@@ -322,6 +322,12 @@ fn pa_expr(expr: &Expr) -> String {
         Expr::Member { target, field } => {
             format!("{}?['{}']", pa_expr(target), field.replace('\'', "''"))
         }
+        Expr::Subscript { target, key } => match key {
+            SubscriptKey::String(s) => {
+                format!("{}?['{}']", pa_expr(target), s.replace('\'', "''"))
+            }
+            SubscriptKey::Index(i) => format!("{}?[{}]", pa_expr(target), i),
+        },
         Expr::Literal(lit) => pa_literal(lit),
         Expr::BinaryOp { op, lhs, rhs } => {
             // PA has no `notEquals`; synthesize it as `not(equals(...))`.
@@ -466,6 +472,38 @@ mod tests {
         let fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let resolved = resolve(&program, Some(&fixtures)).expect("resolve failed");
         emit(&resolved)
+    }
+
+    #[test]
+    fn slice45a_subscript_emits_pa_path_form() {
+        // String-key subscript emits `?['key']`; int-key emits `?[0]`.
+        // Compose inputs wrap the inner expression in `@{...}`.
+        let out = compile(
+            r#"
+            var data: object = triggerBody()
+            let email = data?["body/email"]
+            let first = data?[0]
+            "#,
+        );
+        let email = &out["definition"]["actions"]["Compose_email"]["inputs"];
+        assert_eq!(
+            email.as_str().unwrap(),
+            "@{variables('data')?['body/email']}"
+        );
+        let first = &out["definition"]["actions"]["Compose_first"]["inputs"];
+        assert_eq!(first.as_str().unwrap(), "@{variables('data')?[0]}");
+    }
+
+    #[test]
+    fn slice45a_subscript_escapes_single_quote_in_key() {
+        let out = compile(
+            r#"
+            var data: object = triggerBody()
+            let weird = data?["it's"]
+            "#,
+        );
+        let weird = &out["definition"]["actions"]["Compose_weird"]["inputs"];
+        assert_eq!(weird.as_str().unwrap(), "@{variables('data')?['it''s']}");
     }
 
     #[test]

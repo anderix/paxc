@@ -305,29 +305,53 @@ impl<'a> Parser<'a> {
     fn parse_postfix(&mut self, mut expr: PaExpr) -> Option<PaExpr> {
         loop {
             self.skip_ws();
-            if !self.eat(b'?') {
+            // Both `?[...]` (null-safe) and `[...]` (strict) are valid PA
+            // path syntax. Pax has only the null-safe form; the decoder
+            // collapses both into the same shape, a documented divergence
+            // (round-trip preserves the access path, not the strict-vs-safe
+            // PA semantics). Peek before committing so a stray `?` outside
+            // a path step doesn't get swallowed.
+            let saved_pos = self.pos;
+            let _ = self.eat(b'?');
+            self.skip_ws();
+            if !self.eat(b'[') {
+                self.pos = saved_pos;
                 break;
             }
             self.skip_ws();
-            if !self.eat(b'[') {
-                return None;
-            }
-            self.skip_ws();
-            // Bracket key: PA almost always uses a single-quoted string here.
-            // Other shapes (numeric index, expression index) we don't
-            // translate; bail.
-            if self.peek_byte() != Some(b'\'') {
-                return None;
-            }
-            let key = self.parse_string_literal()?;
+            // Subscript key: string literal (typical) or non-negative int
+            // literal (PA array index). Computed-key expressions are not
+            // slice-45a scope and force the action to fall back.
+            let key_member: PaExpr = match self.peek_byte() {
+                Some(b'\'') => {
+                    let s = self.parse_string_literal()?;
+                    PaExpr::Member {
+                        target: Box::new(expr.clone()),
+                        key: s,
+                    }
+                }
+                Some(b'0'..=b'9') => {
+                    // Materialize as a Member with the stringified index;
+                    // the renderer detects non-ident keys and emits the
+                    // pax subscript form `?[<int>]` either way. We round-trip
+                    // through the same code path as string keys.
+                    let lit = self.parse_number_literal()?;
+                    let s = match lit {
+                        PaExpr::Lit(PaLit::Int(n)) => n.to_string(),
+                        _ => return None,
+                    };
+                    PaExpr::Member {
+                        target: Box::new(expr.clone()),
+                        key: s,
+                    }
+                }
+                _ => return None,
+            };
             self.skip_ws();
             if !self.eat(b']') {
                 return None;
             }
-            expr = PaExpr::Member {
-                target: Box::new(expr),
-                key,
-            };
+            expr = key_member;
         }
         Some(expr)
     }
@@ -529,11 +553,16 @@ fn render_expr(expr: &PaExpr, ctx: &RenderCtx<'_>) -> Option<String> {
     match expr {
         PaExpr::Lit(lit) => render_literal(lit),
         PaExpr::Member { target, key } => {
-            if !is_pax_ident(key) {
-                return None;
-            }
             let inner = render_expr(target, ctx)?;
-            Some(format!("{inner}.{key}"))
+            // Identifier keys get the ergonomic `.field` form; non-identifier
+            // keys (slashes, spaces, hyphens, leading digits) round-trip
+            // through pax's verbatim subscript form `?["<key>"]`. Pax source
+            // strings are double-quoted, the inverse of PA expression text.
+            if is_pax_ident(key) {
+                Some(format!("{inner}.{key}"))
+            } else {
+                Some(format!("{}?[\"{}\"]", inner, escape_pax_string(key)))
+            }
         }
         PaExpr::Call { name, args } => render_call(name, args, ctx),
     }
@@ -543,11 +572,15 @@ fn render_call(name: &str, args: &[PaExpr], ctx: &RenderCtx<'_>) -> Option<Strin
     // Accessors that resolve to pax identifiers.
     match name {
         "variables" => return render_var_accessor(args, ctx),
-        "outputs" => return render_output_accessor(args, ctx),
         "items" => return render_items_accessor(args, ctx),
-        // Accessors with no native pax form at slice 44d.
-        "iterationIndexes" | "triggerBody" | "triggerOutputs" | "trigger" | "actions"
-        | "parameters" | "body" => return None,
+        "outputs" => {
+            // Compose outputs collapse to the let-binding name; non-Compose
+            // outputs fall through to the generic call-form path so things
+            // like `outputs('Get_emails')` still render natively.
+            if let Some(s) = render_output_accessor(args, ctx) {
+                return Some(s);
+            }
+        }
         _ => {}
     }
 
@@ -1156,20 +1189,39 @@ mod tests {
     }
 
     #[test]
-    fn translate_outputs_falls_back_for_non_compose_action() {
-        // The action key needs the `Compose_` prefix to recover a pax let
-        // name. Anything else is a connector / compose-with-no-name etc.
-        assert_eq!(render("@outputs('Send_an_email_V2')", &[]), None);
+    fn translate_outputs_renders_non_compose_as_call_form() {
+        // Compose outputs collapse to the let-binding name. Anything else
+        // (connectors, scopes, etc.) renders as a generic `outputs(...)` call
+        // that pax's grammar parses as a Call expression.
+        assert_eq!(
+            render("@outputs('Send_an_email_V2')", &[]),
+            Some("outputs(\"Send_an_email_V2\")".to_string())
+        );
     }
 
     #[test]
-    fn translate_falls_back_for_trigger_accessors() {
-        // No native pax form for triggerBody/triggerOutputs/parameters/body
-        // at slice 44c. They force fallback.
-        assert!(render("@triggerBody()", &[]).is_none());
-        assert!(render("@triggerOutputs()", &[]).is_none());
-        assert!(render("@parameters('$authentication')", &[]).is_none());
-        assert!(render("@body('GetX')", &[]).is_none());
+    fn translate_pa_accessors_render_as_call_forms() {
+        // triggerBody / triggerOutputs / parameters / body / actions / trigger
+        // round-trip as PA call forms. paxc's grammar accepts them as Call
+        // expressions; paxr can't simulate them but the source is valid.
+        assert_eq!(
+            render("@triggerBody()", &[]),
+            Some("triggerBody()".to_string())
+        );
+        assert_eq!(
+            render("@triggerOutputs()", &[]),
+            Some("triggerOutputs()".to_string())
+        );
+        assert_eq!(
+            render("@parameters('$authentication')", &[]),
+            Some("parameters(\"$authentication\")".to_string())
+        );
+        assert_eq!(
+            render("@body('GetX')", &[]),
+            Some("body(\"GetX\")".to_string())
+        );
+        // `items('For_each')` still requires the iterator to be active in
+        // the render context; without it the call falls back.
         assert!(render("@items('For_each')", &[]).is_none());
     }
 
@@ -1290,10 +1342,13 @@ mod tests {
     }
 
     #[test]
-    fn translate_member_with_slash_key_falls_back() {
-        // The classic Forms pattern: `body/raf2bb...`. Pax can't represent
-        // a slash in a field name.
-        assert!(render("@outputs('Compose_obj')?['body/foo']", &["obj"]).is_none());
+    fn translate_member_with_slash_key_renders_as_subscript() {
+        // The classic Forms pattern: `body/raf2bb...`. Pax represents these
+        // verbatim with the subscript form, which round-trips byte-for-byte.
+        assert_eq!(
+            render("@outputs('Compose_obj')?['body/foo']", &["obj"]).as_deref(),
+            Some("obj?[\"body/foo\"]")
+        );
     }
 
     #[test]
@@ -1323,10 +1378,13 @@ mod tests {
     }
 
     #[test]
-    fn translate_template_falls_back_when_part_doesnt_render() {
-        // Slash in the ?['..'] key forces a single-part fallback, which
-        // poisons the whole template.
-        assert!(render("hello @{outputs('Compose_x')?['body/foo']}", &["x"]).is_none());
+    fn translate_template_with_subscript_path_renders() {
+        // Slashed paths render via subscript form, so a template that
+        // embeds them no longer forces the whole expression to fall back.
+        assert_eq!(
+            render("hello @{outputs('Compose_x')?['body/foo']}", &["x"]).as_deref(),
+            Some("(\"hello \" & x?[\"body/foo\"])")
+        );
     }
 
     // ---------- translation: generic call passthrough ----------

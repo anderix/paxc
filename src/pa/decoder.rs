@@ -1692,11 +1692,12 @@ mod tests {
     }
 
     #[test]
-    fn native_compose_falls_back_on_pa_expression_input() {
+    fn native_compose_renders_pa_accessor_call() {
+        // Slice 45a lifted the forbidden-accessor list; triggerBody() and
+        // the other PA accessors now render as native call forms.
         let action = json!({"type": "Compose", "inputs": "@triggerBody()"});
-        // triggerBody is in paexpr's forbidden-accessor list — even with
-        // expression translation enabled, this falls back.
-        assert!(try_decode_compose("Compose_x", &action).is_none());
+        let stmt = try_decode_compose("Compose_x", &action).expect("should lower natively");
+        assert_eq!(format_native_stmt(&stmt, 0), "let x = triggerBody()");
     }
 
     #[test]
@@ -1972,13 +1973,11 @@ mod tests {
     }
 
     #[test]
-    fn decode_assign_falls_back_when_init_did() {
-        // Real corpus pattern: Initialize_variable_x has a PA-expression
-        // initializer (so its `var x: T = ...` can't be expressed yet and
-        // falls back), but Decrement_variable for the same x is just `1`.
-        // If we natively emitted `x -= 1`, the pax wouldn't compile because
-        // x was never declared. The decoder must keep the assign as a pa
-        // block alongside the init.
+    fn decode_init_with_pa_expression_now_lowers_natively() {
+        // Slice 45a: PA-expression initializers using accessors + subscript
+        // path expressions (`@int(triggerOutputs()?['body/x'])`) now lower
+        // to native pax `var x: int = ...` instead of falling back. The
+        // companion Decrement also lowers natively because `x` is declared.
         let input = json!({
             "properties": {
                 "displayName": "X",
@@ -2009,12 +2008,12 @@ mod tests {
         let report = decode(&input, "x", &dir).unwrap();
         let pax = read(&report.pax_path);
         assert!(
-            pax.contains("pa Decrement_variable"),
-            "expected Decrement_variable to fall back; got: {pax}"
+            pax.contains("var ridx: int = int(triggerOutputs()?[\"body/x\"])"),
+            "expected ridx initializer to lower natively; got: {pax}"
         );
         assert!(
-            !pax.contains("ridx -= 1"),
-            "expected ridx to NOT be natively assigned (no pax declaration exists); got: {pax}"
+            pax.contains("ridx -= 1"),
+            "expected ridx to be natively decremented; got: {pax}"
         );
     }
 
@@ -2209,9 +2208,9 @@ mod tests {
     }
 
     #[test]
-    fn decode_initialize_with_unknown_accessor_falls_back() {
-        // `triggerOutputs()` has no native pax form at slice 44c — the
-        // whole action falls back to a pa block.
+    fn decode_initialize_with_pa_accessor_lowers_natively() {
+        // Slice 45a: triggerOutputs() now has a native pax form (call form),
+        // so the InitializeVariable lowers without needing a pa fallback.
         let input = json!({
             "properties": {
                 "displayName": "Trigger Accessor",
@@ -2236,8 +2235,11 @@ mod tests {
         let dir = tmp_dir("trigger_accessor");
         let report = decode(&input, "x", &dir).unwrap();
         let pax = read(&report.pax_path);
-        assert!(pax.contains("pa Initialize_data"), "pax was: {pax}");
-        assert!(dir.join("pa/Initialize_data.json").exists());
+        assert!(
+            pax.contains("var data: object = triggerOutputs()"),
+            "pax was: {pax}"
+        );
+        assert!(!dir.join("pa/Initialize_data.json").exists());
     }
 
     // ---------- 44d: container decoding ----------
@@ -2349,9 +2351,11 @@ mod tests {
     }
 
     #[test]
-    fn decode_if_with_unresolvable_condition_falls_back() {
-        // The condition references body() of a connector — no native pax
-        // form yet, so the whole If falls back as one opaque pa block.
+    fn decode_if_with_connector_body_condition_lowers_natively() {
+        // Slice 45a: body() + ?['body/field'] now both render. The If
+        // container lowers natively; only the inner OpenApiConnection
+        // action falls back to a pa block (which is what we want -- the
+        // connector body stays opaque, the control flow becomes source).
         let input = json!({
             "properties": {
                 "displayName": "X",
@@ -2375,11 +2379,13 @@ mod tests {
         let dir = tmp_dir("if_fallback");
         let report = decode(&input, "x", &dir).unwrap();
         let pax = read(&report.pax_path);
-        assert!(pax.contains("pa If_complex"), "pax was: {pax}");
-        // The whole container is opaque; the inner action's pa/ file is
-        // NOT separately written — it lives inside the parent's body file.
-        assert!(dir.join("pa/If_complex.json").exists());
-        assert!(!dir.join("pa/Inner.json").exists());
+        assert!(
+            pax.contains("if (body(\"Get_response\")?[\"body/field\"] == \"x\")"),
+            "pax was: {pax}"
+        );
+        assert!(pax.contains("pa Inner"), "pax was: {pax}");
+        assert!(!dir.join("pa/If_complex.json").exists());
+        assert!(dir.join("pa/Inner.json").exists());
     }
 
     #[test]
@@ -2657,9 +2663,9 @@ mod tests {
     }
 
     #[test]
-    fn decode_terminate_failed_unrenderable_message_falls_back() {
-        // The message references triggerBody — no native form yet — so the
-        // whole action falls back rather than dropping the message silently.
+    fn decode_terminate_failed_with_pa_accessor_message_lowers_natively() {
+        // Slice 45a: triggerBody() now renders, so a `terminate failed`
+        // whose message references it lowers natively to pax source.
         let action = json!({
             "type": "Terminate",
             "inputs": {
@@ -2667,7 +2673,11 @@ mod tests {
                 "runError": { "message": "@triggerBody()" }
             }
         });
-        assert!(try_decode(&action).is_none());
+        let stmt = try_decode(&action).expect("should lower natively");
+        assert_eq!(
+            format_native_stmt(&stmt, 0),
+            "terminate failed triggerBody()"
+        );
     }
 
     // ---------- 44e: on-handler ----------

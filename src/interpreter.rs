@@ -13,7 +13,7 @@
 //! to `Null`. This keeps the interpreter focused and avoids reimplementing
 //! PA's 200+ expression functions.
 
-use crate::ast::{BinOp, DebugArg, Expr, HandlerStatus, Literal, Type, UnaryOp};
+use crate::ast::{BinOp, DebugArg, Expr, HandlerStatus, Literal, SubscriptKey, Type, UnaryOp};
 use crate::lexer::Span;
 use crate::resolver::{ActionKind, ResolvedAction, ResolvedProgram};
 use serde_json::{Map, Value as JsonValue, json};
@@ -228,6 +228,10 @@ struct Interpreter<'src> {
     compose_outputs: HashMap<String, Value>,
     /// Keyed by Apply_to_each action name -> current iterator element.
     iterators: HashMap<String, Value>,
+    /// Keyed by Apply_to_each action name -> current zero-based iteration
+    /// index. Mirrors the `iterators` map so paxr can answer
+    /// `iterationIndexes('<loop>')` for the active foreach.
+    iter_indexes: HashMap<String, i64>,
     /// Top-level var + let bindings in source order. Bindings declared
     /// inside `if` or `foreach` bodies are scoped to those branches and
     /// do not land in the end-of-run state dump.
@@ -249,6 +253,7 @@ impl<'src> Interpreter<'src> {
             vars: HashMap::new(),
             compose_outputs: HashMap::new(),
             iterators: HashMap::new(),
+            iter_indexes: HashMap::new(),
             bindings: Vec::new(),
             halted: false,
         }
@@ -450,6 +455,7 @@ impl<'src> Interpreter<'src> {
                 self.trace(&format!("foreach {} ({} items)", action.name, items.len()));
                 for (idx, item) in items.into_iter().enumerate() {
                     self.iterators.insert(action.name.clone(), item.clone());
+                    self.iter_indexes.insert(action.name.clone(), idx as i64);
                     self.indent += 1;
                     self.trace(&format!(
                         "iter[{idx}] {iter_name} = {}",
@@ -462,6 +468,7 @@ impl<'src> Interpreter<'src> {
                     }
                 }
                 self.iterators.remove(&action.name);
+                self.iter_indexes.remove(&action.name);
             }
             ActionKind::Debug { args, span } => {
                 self.emit_debug(args, *span)?;
@@ -647,6 +654,30 @@ impl<'src> Interpreter<'src> {
                     _ => Err(err(format!("cannot access field '{field}' on non-object"))),
                 }
             }
+            Expr::Subscript { target, key } => {
+                // Null-safe chain semantics: missing key, mismatched key/value
+                // type, or a Null target all collapse to Null. Mirrors PA's
+                // `?[...]` runtime behavior so `triggerBody()?['x']?['y']`
+                // evaluates without erroring even when `triggerBody()` itself
+                // returns Null (the registry stub).
+                let target_val = self.eval(target)?;
+                let result = match (target_val, key) {
+                    (Value::Object(entries), SubscriptKey::String(s)) => entries
+                        .into_iter()
+                        .find(|(k, _)| k == s)
+                        .map(|(_, v)| v)
+                        .unwrap_or(Value::Null),
+                    (Value::Array(items), SubscriptKey::Index(i)) => {
+                        if *i >= 0 && (*i as usize) < items.len() {
+                            items.into_iter().nth(*i as usize).unwrap_or(Value::Null)
+                        } else {
+                            Value::Null
+                        }
+                    }
+                    _ => Value::Null,
+                };
+                Ok(result)
+            }
             Expr::BinaryOp { op, lhs, rhs } => {
                 let l = self.eval(lhs)?;
                 let r = self.eval(rhs)?;
@@ -660,6 +691,17 @@ impl<'src> Interpreter<'src> {
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
                     vals.push(self.eval(a)?);
+                }
+                // iterationIndexes(<loopName>) needs interpreter state, so it
+                // bypasses the pure-function registry. Returns the active
+                // iteration index for the named foreach; falls through to the
+                // standard skip notice when the loop isn't running.
+                if name == "iterationIndexes"
+                    && vals.len() == 1
+                    && let Value::Str(loop_name) = &vals[0]
+                    && let Some(idx) = self.iter_indexes.get(loop_name)
+                {
+                    return Ok(Value::Int(*idx));
                 }
                 let (value, unknown) = eval_call(name, vals);
                 if unknown {
@@ -933,6 +975,73 @@ mod tests {
     #[test]
     fn executes_arithmetic_and_comparisons() {
         run("var x: int = 3\nx += 4\nlet ok = x == 7\n").unwrap();
+    }
+
+    #[test]
+    fn slice45a_subscript_string_key_lookup() {
+        let state = run(r#"
+            var data: object = { "name": "x", "body/email": "a@b.com" }
+            let n = data?["name"]
+            let e = data?["body/email"]
+        "#)
+        .unwrap();
+        assert!(matches!(state.compose_outputs.get("Compose_n"), Some(Value::Str(s)) if s == "x"));
+        assert!(
+            matches!(state.compose_outputs.get("Compose_e"), Some(Value::Str(s)) if s == "a@b.com")
+        );
+    }
+
+    #[test]
+    fn slice45a_subscript_index_lookup() {
+        let state = run(r#"
+            var arr: array = ["a", "b", "c"]
+            let first = arr?[0]
+            let third = arr?[2]
+            let oob = arr?[9]
+        "#)
+        .unwrap();
+        assert!(
+            matches!(state.compose_outputs.get("Compose_first"), Some(Value::Str(s)) if s == "a")
+        );
+        assert!(
+            matches!(state.compose_outputs.get("Compose_third"), Some(Value::Str(s)) if s == "c")
+        );
+        assert!(matches!(
+            state.compose_outputs.get("Compose_oob"),
+            Some(Value::Null)
+        ));
+    }
+
+    #[test]
+    fn slice45a_subscript_chains_through_null() {
+        // triggerBody() returns Null in paxr (registry stub). The subscript
+        // chain that follows should evaluate to Null without erroring,
+        // matching PA's null-safe `?[...]` runtime behavior.
+        let state = run(r#"
+            let v = triggerBody()?["body"]?["email"]
+        "#)
+        .unwrap();
+        assert!(matches!(
+            state.compose_outputs.get("Compose_v"),
+            Some(Value::Null)
+        ));
+    }
+
+    #[test]
+    fn slice45a_iteration_indexes_returns_active_loop_index() {
+        // Inside a foreach, iterationIndexes('<actionKey>') returns 0..n-1
+        // for each iteration. The action key for an unnamed foreach is the
+        // PA-canonical `Apply_to_each`; we capture the last index in a var
+        // so it survives the loop in the final state.
+        let state = run(r#"
+            var items: array = [10, 20, 30]
+            var seen: int
+            foreach iter in items {
+              seen = iterationIndexes("Apply_to_each")
+            }
+        "#)
+        .unwrap();
+        assert!(matches!(state.vars.get("seen"), Some(Value::Int(2))));
     }
 
     #[test]

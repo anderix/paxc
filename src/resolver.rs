@@ -1293,6 +1293,13 @@ fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, Res
                 field: field.clone(),
             })
         }
+        Expr::Subscript { target, key } => {
+            let resolved_target = resolve_expr(target, env)?;
+            Ok(Expr::Subscript {
+                target: Box::new(resolved_target),
+                key: key.clone(),
+            })
+        }
         Expr::VarRef { .. } | Expr::ComposeRef { .. } | Expr::IteratorRef { .. } => {
             Ok(expr.clone())
         }

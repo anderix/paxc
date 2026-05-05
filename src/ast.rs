@@ -320,6 +320,15 @@ pub enum Expr {
         target: Box<Expr>,
         field: String,
     },
+    /// Subscript access `target?[<literal>]` -- pax's verbatim form for PA's
+    /// `?[...]` path syntax. Used when the key isn't a valid pax identifier
+    /// (slashes, spaces, hyphens, numeric indexes). Chains via nested
+    /// Subscript / Member nodes. Slice 45a only allows literal keys; computed
+    /// keys force fallback at the decoder and aren't writable in source.
+    Subscript {
+        target: Box<Expr>,
+        key: SubscriptKey,
+    },
     /// Reference to a foreach iterator. `action_name` is the `Apply_to_each`
     /// action key the iterator belongs to. Emits `items('action_name')`.
     /// Span is the originating identifier in source.
@@ -344,6 +353,14 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+}
+
+/// Key for a `Subscript` expression. Slice 45a permits only literal keys --
+/// either a JSON-string-style path segment or a non-negative array index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscriptKey {
+    String(String),
+    Index(i64),
 }
 
 #[derive(Debug, Clone)]
