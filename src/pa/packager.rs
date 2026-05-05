@@ -83,6 +83,15 @@ fn package_pa_legacy(
     // Compile, then transform to PA-inner shape.
     let compiled = emitter::emit(program);
     let inner_def = transform_for_pa(&compiled);
+    // Connection references come from `pa/connectionReferences.json` via
+    // the resolver and end up at the top level of the compiled object.
+    // Without forwarding them into the envelope, PA's importer rejects
+    // every connector action ("API connection reference '<x>' could not
+    // be found"). An absent file -> the existing empty default.
+    let connection_references = compiled
+        .get("connectionReferences")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
 
     let package_guid = Uuid::new_v4().to_string();
     let flow_guid = Uuid::new_v4().to_string();
@@ -93,7 +102,7 @@ fn package_pa_legacy(
 
     let root_manifest = build_root_manifest(name, &package_guid, &telemetry_guid, created_time);
     let inner_manifest = build_inner_manifest(&package_guid);
-    let flow_def = build_flow_envelope(inner_def, name, &flow_guid);
+    let flow_def = build_flow_envelope(inner_def, name, &flow_guid, connection_references);
 
     let files: Vec<(String, Vec<u8>)> = vec![
         (
@@ -339,7 +348,12 @@ fn build_inner_manifest(package_guid: &str) -> Value {
     })
 }
 
-fn build_flow_envelope(inner_def: Value, name: &str, flow_guid: &str) -> Value {
+fn build_flow_envelope(
+    inner_def: Value,
+    name: &str,
+    flow_guid: &str,
+    connection_references: Value,
+) -> Value {
     json!({
         "name": flow_guid,
         "id": format!("/providers/Microsoft.Flow/flows/{flow_guid}"),
@@ -348,7 +362,7 @@ fn build_flow_envelope(inner_def: Value, name: &str, flow_guid: &str) -> Value {
             "apiId": "/providers/Microsoft.PowerApps/apis/shared_logicflows",
             "displayName": name,
             "definition": inner_def,
-            "connectionReferences": {},
+            "connectionReferences": connection_references,
             "flowFailureAlertSubscribed": false,
             "isManaged": false
         }
