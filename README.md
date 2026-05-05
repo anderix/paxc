@@ -4,9 +4,9 @@
 
 For the full language reference, see [REFERENCE.md](REFERENCE.md).
 
-## Status
+3.0.0 shipped. Every construct listed in REFERENCE.md is implemented and tested, end-to-end deployment to Power Automate has been validated, and a legacy-format package target lets you import compiled flows directly through the Power Automate portal.
 
-v1.2 shipped. Every construct listed in REFERENCE.md is implemented and tested, end-to-end deployment to Power Automate has been validated, and a legacy-format package target lets you import compiled flows directly through the Power Automate portal.
+3.0.0 reflects a strategic reframing of the language: round-trip from existing PA flows is now the primary forward direction. Connector bodies, ParseJson, and any non-default trigger live in JSON files next to the source under a `pa/` folder. pax owns the programmable parts (variables, control flow, expressions); files own the PA-specific parts. The `raw{}` escape hatch and the `trigger ...` syntax are gone, replaced by the file convention.
 
 ## Why
 
@@ -36,7 +36,9 @@ The source is shorter, and more importantly, the `runAfter` dependency graph is 
 
 ## What pax covers
 
-The language supports manual triggers, typed variables and Compose bindings, assignment and compound assignment, arithmetic and boolean expressions, string concatenation, member access, `if`/`else if`/`else` and `foreach` control flow, function calls that pass through to Power Automate's expression language, a `raw` escape hatch for anything pax doesn't model natively (including all connector actions), and a `debug()` statement that paxr prints at runtime and paxc strips at compile time.
+The language supports typed variables and `let` Compose bindings; assignment and compound assignment; arithmetic, boolean, and string concatenation expressions; member access; `if`/`else if`/`else`, `foreach`, `until`, `switch`, `scope`, `terminate`, and `on <status>` error-path handlers; function calls that pass through to Power Automate's expression language; a `pa <Name>` primitive for any PA-shaped action whose body lives in `pa/<Name>.json` next to the source (connectors, ParseJson, anything PA-designer-shaped); and a `debug()` statement that paxr prints at runtime and paxc strips at compile time.
+
+Triggers are file-based: drop a single `pa/<Name>.trigger.json` next to the source to pick the trigger; without one, paxc generates a default manual ("Button") trigger. Connection references go in `pa/connectionReferences.json` and end up at the flow's top level on emit.
 
 ## Installing
 

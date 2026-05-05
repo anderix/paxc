@@ -2,15 +2,15 @@
 
 pax is a small domain-specific language for Power Automate cloud flows. The `paxc` compiler emits the JSON that Power Automate expects, and the `paxr` interpreter runs the same source locally so you can see what a flow does before deploying it.
 
-A pax source file declares a trigger, then lists actions in the order they should execute. The compiler infers the `runAfter` dependency graph from source order, which means the source you write looks like imperative code even though what gets emitted is a graph of named actions.
+A pax source file is a sequence of statements in the order they should execute. The compiler infers the `runAfter` dependency graph from source order, which means the source you write looks like imperative code even though what gets emitted is a graph of named actions.
+
+pax owns the programmable parts of a flow (variables, control flow, expressions). PA-specific parts (connectors, ParseJson, non-default triggers, connection references) live in JSON files next to the source under a `pa/` folder. paxc reads those files at compile time and drops their contents verbatim into the emitted flow.
 
 ## A minimal example
 
 Save this as `hello.pax`:
 
 ```
-trigger manual
-
 let greeting = "Hello, world!"
 debug(greeting)
 ```
@@ -40,27 +40,43 @@ Two observations matter here. The `let greeting = ...` line is a Compose in both
 
 ## Triggers
 
-Every pax program starts with a trigger declaration. Two trigger forms are currently supported.
+Triggers are file-based. paxc scans the source directory's `pa/` folder for a single `*.trigger.json` file at compile time. The filename minus the `.trigger.json` suffix becomes the PA trigger key, and the file's contents are dropped verbatim into the emitted flow's `definition.triggers`.
 
-### Manual
+If no trigger file is present, paxc generates a default manual ("Button") trigger so a fresh pax source compiles without any setup. Two or more `*.trigger.json` files under `pa/` is a compile error -- a flow can only have one trigger.
 
+### Default manual
+
+With no `pa/*.trigger.json` next to the source, paxc emits:
+
+```json
+"triggers": {
+  "manual": {
+    "type": "Request",
+    "kind": "Button",
+    "inputs": {}
+  }
+}
 ```
-trigger manual
+
+That covers the common case: write a pax program, compile it, get a Button-triggered flow.
+
+### File-based triggers
+
+For anything else (Recurrence, HTTP request, connector webhook), put a JSON file under `pa/` named after the trigger. Example: `pa/Recurrence.trigger.json` for a 5-minute schedule:
+
+```json
+{
+    "type": "Recurrence",
+    "recurrence": {
+        "frequency": "Minute",
+        "interval": 5
+    }
+}
 ```
 
-Compiles to Power Automate's "manually trigger a flow" button. The trigger takes no arguments in its pax form.
+The filename's stem (`Recurrence`) becomes the trigger's key in `definition.triggers`. The file's content matches PA's "Code View" / "Peek code" output exactly, which makes round-trip from a real PA flow byte-identical.
 
-### Schedule
-
-```
-trigger schedule every 5 minutes
-trigger schedule every hour
-trigger schedule every 2 days
-```
-
-Compiles to Power Automate's Recurrence trigger. The syntax is `trigger schedule every [N] <unit>`. The integer defaults to 1 when omitted. Units are `second`, `minute`, `hour`, `day`, `week`, `month`, with singular and plural forms both accepted. The emitted trigger is a `Recurrence` object with `frequency` (the capitalized unit name) and `interval` (the integer).
-
-Advanced recurrence features such as `startTime`, `timeZone`, and the nested `schedule` object (for patterns like "every Monday at 9am") are not yet modeled in pax syntax. paxr does not execute triggers, so a scheduled flow runs through the interpreter exactly like a manual one.
+paxr does not execute triggers, so a flow with a non-default trigger runs through the interpreter exactly like a manual one.
 
 ## Variables and types
 
@@ -233,10 +249,7 @@ As with `foreach`, a `terminate` inside the body halts both the loop and the enc
 
 ```
 scope try_work {
-  raw HTTP_Get_Data {
-    "type": "Http",
-    "inputs": { "method": "GET", "uri": "https://api.example.com/data" }
-  }
+  pa HTTP_Get_Data
 }
 ```
 
@@ -250,7 +263,7 @@ Scope bodies follow the same nesting rules as `if` and `foreach` bodies: nested 
 
 ```
 scope fetch_data {
-  raw HTTP_Get_Data { ... }
+  pa HTTP_Get_Data
 }
 
 on failed fetch_data {
@@ -262,15 +275,12 @@ on succeeded fetch_data {
 }
 ```
 
-`on <status> [or <status>]* <target> { ... }` attaches a handler to a named scope or named raw block. The handler runs when the target reports any of the listed statuses. Supported statuses are `succeeded`, `failed`, `skipped`, and `timedout`, which mirrors the set Power Automate's own `runAfter` accepts. Each handler compiles to a Power Automate `Scope` action whose `runAfter` points at the target with every listed status in the array.
+`on <status> [or <status>]* <target> { ... }` attaches a handler to a named scope or pa action. The handler runs when the target reports any of the listed statuses. Supported statuses are `succeeded`, `failed`, `skipped`, and `timedout`, which mirrors the set Power Automate's own `runAfter` accepts. Each handler compiles to a Power Automate `Scope` action whose `runAfter` points at the target with every listed status in the array.
 
-Raw blocks are always valid handler targets without opt-in syntax -- their user-written name is also their PA action key. This is the most natural place to attach retry / recovery logic in the stub-and-fix workflow, because the action most likely to fail is usually a connector call living inside a raw block.
+pa actions are always valid handler targets without opt-in syntax -- their user-written name is also their PA action key. This is the most natural place to attach retry / recovery logic in the stub-and-fix workflow, because the action most likely to fail is usually a connector call.
 
 ```
-raw HTTP_Get_Order {
-  "type": "Http",
-  "inputs": { "method": "GET", "uri": "https://api.example.com/orders/123" }
-}
+pa HTTP_Get_Order
 
 on failed or timedout HTTP_Get_Order {
   debug("recoverable call failure")
@@ -291,9 +301,9 @@ Handlers sit off the main sibling chain. A statement written after any handlers 
 
 Multiple handlers on the same scope are independent parallel actions in the emitted graph. Handler action names follow the pattern `On_<status>_<target>` for a single-status handler, or `On_<status1>_<status2>_..._<target>` for a multi-status handler (for example, `On_failed_fetch_data` or `On_failed_timedout_fetch_data`), auto-suffixed if two handlers would otherwise collide.
 
-The target of an `on` handler must be a named scope or raw block declared somewhere earlier in the source. An unknown target raises a resolve error with a "not a named scope or raw block" diagnostic.
+The target of an `on` handler must be a named scope or pa action declared somewhere earlier in the source. An unknown target raises a resolve error with a "not a named scope or pa action" diagnostic.
 
-Handler targets share one namespace: named scopes and raw blocks compete for the same names across the whole program. Declaring two blocks with the same name (two `scope work`, or a `scope foo` and a later `raw foo`, or two `raw HTTP_Call`) is a resolve error. The rule is strict: names are globally unique regardless of nesting, so two scopes with the same name in mutually-exclusive branches of an `if` / `else` / `switch` / `foreach` / `until` / `scope` are also rejected. The strictness keeps the mental model simple and prevents PA from compiling two identically-labeled actions. Anonymous `scope { }` blocks do not register a name, so you can have any number of them.
+Handler targets share one namespace: named scopes and pa actions compete for the same names across the whole program. Declaring two blocks with the same name (two `scope work`, or a `scope foo` and a later `pa foo`, or two `pa HTTP_Call`) is a resolve error. The rule is strict: names are globally unique regardless of nesting, so two scopes with the same name in mutually-exclusive branches of an `if` / `else` / `switch` / `foreach` / `until` / `scope` are also rejected. The strictness keeps the mental model simple and prevents PA from compiling two identically-labeled actions. Anonymous `scope { }` blocks do not register a name, so you can have any number of them.
 
 paxr walks the happy path, so any handler whose status list contains `succeeded` fires locally and its side effects appear in the end-of-run state dump. Handlers without `succeeded` in their list cannot be triggered from the interpreter, so paxr prints `<skipping on-<labels> handler "...">` and moves on without executing them. The compiled flow in Power Automate still dispatches them correctly at runtime.
 
@@ -353,10 +363,16 @@ A few semantics worth knowing:
 
 Date and time functions (`utcNow`, `formatDateTime`, `addMinutes`, and the rest) are not yet implemented in paxr and currently render as null under the interpreter. They continue to work correctly in Power Automate.
 
-## The raw escape hatch
+## The pa primitive
 
 ```
-raw Post_to_webhook {
+pa Post_to_webhook
+```
+
+with `pa/Post_to_webhook.json` next to the source:
+
+```json
+{
   "type": "Http",
   "inputs": {
     "method": "POST",
@@ -377,11 +393,24 @@ raw Post_to_webhook {
 }
 ```
 
-When pax doesn't model an action natively (which is the case for every connector, including SharePoint, Outlook, Teams, and HTTP, and for some less common primitive operations), `raw` lets you drop a verbatim Power Automate action definition into the flow. The name after `raw` (`Post_to_webhook` above) becomes the action key in the emitted JSON. The block inside `{ ... }` is JSON object syntax and is emitted into the flow definition with minimal transformation.
+When pax doesn't model an action natively (which is the case for every connector, including SharePoint, Outlook, Teams, and HTTP, and for ParseJson and other PA-designer-shaped primitives), `pa <Name>` references an opaque action whose body lives in `pa/<Name>.json` next to the source. paxc reads the file at compile time and drops it verbatim into the emitted flow's `definition.actions`. The name after `pa` becomes the action key, and it must be a valid pax identifier (matches `[A-Za-z_][A-Za-z0-9_]*`) so it doubles as a filesystem-safe filename.
 
-Inside a `raw` body you write Power Automate expression strings directly. Variables are referenced as `@{variables('name')}`, Compose outputs as `@{outputs('Compose_name')}`, and trigger data as `@{triggerBody()}`. This is the one place in a pax source file where you need to know PA expression syntax rather than pax syntax.
+Inside the JSON file you write Power Automate expression strings directly. Variables are referenced as `@{variables('name')}`, Compose outputs as `@{outputs('Compose_name')}`, and trigger data as `@{triggerBody()}`. This is the one place where you write PA expression syntax rather than pax syntax. The convention is for the file to match PA's "Code View" / "Peek code" output exactly, which makes round-trip from a real PA flow byte-identical.
 
-Raw blocks participate in the runAfter chain like any other statement: they run after the preceding statement, and the next statement runs after them. Paxr can't invoke real connectors, so when it encounters a `raw` block during interpretation it prints `<skipping raw "Name">` and moves on.
+pa actions participate in the runAfter chain like any other statement: they run after the preceding statement, and the next statement runs after them. The file's own `runAfter` (if it has one from PA's Peek code) is informational only -- paxc's structural sequence wins on emit. Paxr can't invoke real connectors, so when it encounters a `pa` action during interpretation it prints `<skipping pa action "Name">` and moves on.
+
+## Connection references
+
+PA flows that use connectors carry a top-level `connectionReferences` map in the flow envelope. paxc reads it from `pa/connectionReferences.json` if present:
+
+```
+pa/
+├── Get_items.json
+├── Send_email.json
+└── connectionReferences.json
+```
+
+The JSON file's contents are dropped verbatim at the top level alongside `definition` in the emitter's output, and the packager places them in the legacy import package at the location PA expects. If no `pa/connectionReferences.json` is present, the field is simply omitted -- which is fine for connector-free flows.
 
 ## debug() and paxr
 
@@ -435,7 +464,7 @@ Power Automate's flow definition is a map of actions keyed by name, and each act
 
 This rule applies recursively inside control flow. Inside an `if` body, statements chain to each other starting fresh at the first branch statement. Inside a `foreach`, `switch` case, `until`, or `scope` body, same rule. `debug()` statements are stripped at compile time and don't participate at all. `on` handlers are the one intentional break from the source-order rule: their `runAfter` points at their target scope with the chosen status, and statements following a handler chain back to the last real action before any handlers, not to the handler itself.
 
-The practical consequence: you write pax the way you'd write any imperative code, and the dependency graph comes out correct. You never touch `runAfter` directly unless you're using a `raw` block with unusual dependency needs.
+The practical consequence: you write pax the way you'd write any imperative code, and the dependency graph comes out correct. You never touch `runAfter` directly. The runAfter inside a `pa/<Name>.json` body is informational only; paxc's structural sequence wins on emit, which preserves the property that pasting Peek-code output into the file Just Works.
 
 ## Running paxc and paxr
 
@@ -466,4 +495,4 @@ Running a flow through paxr first is a fast sanity check before making the round
 
 ## More examples
 
-The `examples/slice*.pax` files each focus on a single feature and are useful when you want a minimal example of one thing. `examples/tour.pax` is a broader walkthrough of the original v1.1 surface, including variables, foreach, if/else, function calls, member access, string concat, and the raw escape hatch. Features added since v1.1 (the `debug()` statement, the Schedule trigger, `terminate`, the expanded paxr function library, and the control-flow sweep additions of `switch`, `scope`, `until`, and `on` handlers) appear in their dedicated slice examples rather than in the tour.
+The `examples/slice*.pax` files each focus on a single feature and are useful when you want a minimal example of one thing. `examples/tour.pax` is a broader walkthrough including variables, foreach, if/else, function calls, member access, string concat, and the `pa <Name>` opaque-action primitive. Features added since the original tour (the `debug()` statement, `terminate`, the expanded paxr function library, the control-flow sweep additions of `switch`, `scope`, `until`, and `on` handlers, and the file-based trigger convention introduced in 3.0.0) appear in their dedicated slice examples rather than in the tour. Opaque action bodies live in `examples/pa/`; the file-based trigger demo lives at `examples/pa/Recurrence.trigger.json`.
