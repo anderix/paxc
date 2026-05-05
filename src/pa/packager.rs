@@ -92,6 +92,11 @@ fn package_pa_legacy(
         .get("connectionReferences")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    // Build per-connection-reference resource descriptors that the legacy
+    // package wires together via apisMap, connectionsMap, and the root
+    // manifest's `resources` block. PA's importer needs the full graph;
+    // an empty connectionsMap fails with PackageFlowMissingConnectionMap.
+    let conn_resources = build_connection_resources(&connection_references);
 
     let package_guid = Uuid::new_v4().to_string();
     let flow_guid = Uuid::new_v4().to_string();
@@ -100,9 +105,18 @@ fn package_pa_legacy(
     // A static value keeps packages reproducible from paxc's perspective.
     let created_time = "2026-04-21T00:00:00.0000000Z";
 
-    let root_manifest = build_root_manifest(name, &package_guid, &telemetry_guid, created_time);
+    let root_manifest = build_root_manifest(
+        name,
+        &package_guid,
+        &telemetry_guid,
+        created_time,
+        &conn_resources,
+    );
     let inner_manifest = build_inner_manifest(&package_guid);
     let flow_def = build_flow_envelope(inner_def, name, &flow_guid, connection_references);
+
+    let apis_map = build_apis_map(&conn_resources);
+    let connections_map = build_connections_map(&conn_resources);
 
     let files: Vec<(String, Vec<u8>)> = vec![
         (
@@ -115,11 +129,11 @@ fn package_pa_legacy(
         ),
         (
             format!("Microsoft.Flow/flows/{package_guid}/apisMap.json"),
-            b"{}".to_vec(),
+            serde_json::to_vec(&apis_map)?,
         ),
         (
             format!("Microsoft.Flow/flows/{package_guid}/connectionsMap.json"),
-            b"{}".to_vec(),
+            serde_json::to_vec(&connections_map)?,
         ),
         (
             format!("Microsoft.Flow/flows/{package_guid}/definition.json"),
@@ -308,13 +322,96 @@ fn fix_connector_inputs(actions: &mut Value) {
     }
 }
 
+/// Per-connection-reference resource descriptor used to wire up the legacy
+/// package's manifest, apisMap, and connectionsMap. Built from
+/// `pa/connectionReferences.json` (forwarded through the compiled envelope).
+struct ConnResource {
+    /// Connection reference name (the key in connectionReferences and the
+    /// label inside `host.connectionReferenceName`).
+    ref_name: String,
+    /// API path (e.g., `/providers/Microsoft.PowerApps/apis/shared_sharepointonline`).
+    api_id: String,
+    /// User-facing API display name (best-effort from `apiName`; PA fills
+    /// in the canonical name during import). Cosmetic — not load-bearing.
+    api_display_name: String,
+    /// Resource GUID for the API entry in the root manifest.
+    api_guid: String,
+    /// Resource GUID for the connection entry in the root manifest.
+    connection_guid: String,
+}
+
+/// Walk the connectionReferences map and synthesize a ConnResource for each
+/// reference. Generates package-local GUIDs for the API and connection
+/// resources; the import experience prompts the user to map each connection
+/// to one in their tenant.
+fn build_connection_resources(connection_references: &Value) -> Vec<ConnResource> {
+    let Some(map) = connection_references.as_object() else {
+        return Vec::new();
+    };
+    map.iter()
+        .map(|(name, body)| {
+            let api_id = body
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let api_name = body
+                .get("apiName")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            // PA's display names for connectors are usually a friendly
+            // capitalization of the apiName (`sharepointonline` →
+            // `SharePoint`). We don't carry the friendly map; fall back to
+            // the apiName itself, which the importer overrides with the
+            // tenant's canonical name anyway.
+            let api_display_name = if api_name.is_empty() {
+                name.clone()
+            } else {
+                api_name
+            };
+            ConnResource {
+                ref_name: name.clone(),
+                api_id,
+                api_display_name,
+                api_guid: Uuid::new_v4().to_string(),
+                connection_guid: Uuid::new_v4().to_string(),
+            }
+        })
+        .collect()
+}
+
+fn build_apis_map(conn_resources: &[ConnResource]) -> Value {
+    let mut m = Map::new();
+    for r in conn_resources {
+        m.insert(r.ref_name.clone(), Value::String(r.api_guid.clone()));
+    }
+    Value::Object(m)
+}
+
+fn build_connections_map(conn_resources: &[ConnResource]) -> Value {
+    let mut m = Map::new();
+    for r in conn_resources {
+        m.insert(r.ref_name.clone(), Value::String(r.connection_guid.clone()));
+    }
+    Value::Object(m)
+}
+
 fn build_root_manifest(
     name: &str,
     package_guid: &str,
     telemetry_guid: &str,
     created_time: &str,
+    conn_resources: &[ConnResource],
 ) -> Value {
     let mut resources = Map::new();
+
+    // Flow resource depends on every API and connection it uses.
+    let mut flow_depends_on: Vec<Value> = Vec::new();
+    for r in conn_resources {
+        flow_depends_on.push(Value::String(r.api_guid.clone()));
+        flow_depends_on.push(Value::String(r.connection_guid.clone()));
+    }
     resources.insert(
         package_guid.to_string(),
         json!({
@@ -324,9 +421,40 @@ fn build_root_manifest(
             "details": {"displayName": name},
             "configurableBy": "User",
             "hierarchy": "Root",
-            "dependsOn": []
+            "dependsOn": flow_depends_on
         }),
     );
+
+    // For each connection reference, declare two resources: the API and the
+    // user-mapped connection. The connection depends on its API.
+    for r in conn_resources {
+        resources.insert(
+            r.api_guid.clone(),
+            json!({
+                "id": r.api_id,
+                "name": r.ref_name,
+                "type": "Microsoft.PowerApps/apis",
+                "suggestedCreationType": "Existing",
+                "details": {"displayName": r.api_display_name},
+                "configurableBy": "System",
+                "hierarchy": "Child",
+                "dependsOn": []
+            }),
+        );
+        resources.insert(
+            r.connection_guid.clone(),
+            json!({
+                "type": "Microsoft.PowerApps/apis/connections",
+                "suggestedCreationType": "Existing",
+                "creationType": "Existing",
+                "details": {"displayName": r.ref_name},
+                "configurableBy": "User",
+                "hierarchy": "Child",
+                "dependsOn": [r.api_guid.clone()]
+            }),
+        );
+    }
+
     json!({
         "schema": "1.0",
         "details": {
