@@ -194,34 +194,63 @@ enum Binding {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
-    DuplicateVariable { name: String, span: Span },
-    UndefinedVariable { name: String, span: Span },
-    InvalidOperation { op: AssignOp, name: String, ty: Type, span: Span },
-    CannotAssignToImmutable { name: String, span: Span },
+    DuplicateVariable {
+        name: String,
+        span: Span,
+    },
+    UndefinedVariable {
+        name: String,
+        span: Span,
+    },
+    InvalidOperation {
+        op: AssignOp,
+        name: String,
+        ty: Type,
+        span: Span,
+    },
+    CannotAssignToImmutable {
+        name: String,
+        span: Span,
+    },
     /// `var` declarations must be at the top level of the flow. PA's
     /// `InitializeVariable` action is only valid at the workflow scope,
     /// so nesting one inside a Condition or Apply_to_each produces an
     /// invalid definition.
-    NestedVarDeclaration { name: String, span: Span },
+    NestedVarDeclaration {
+        name: String,
+        span: Span,
+    },
     /// `on <status> <target> { ... }` named a target that no named scope
     /// or raw block resolves to. `scope <name> { ... }` and `raw <name>
     /// { ... }` both register as handler targets; future versions may
     /// allow additional named actions.
-    UnknownHandlerTarget { name: String, span: Span },
+    UnknownHandlerTarget {
+        name: String,
+        span: Span,
+    },
     /// Multi-status handler `on a or b or ... <target>` listed the same
     /// status twice. Redundant but usually a typo, so reject rather than
     /// silently dedup.
-    DuplicateHandlerStatus { status: HandlerStatus, span: Span },
+    DuplicateHandlerStatus {
+        status: HandlerStatus,
+        span: Span,
+    },
     /// `until ... max N` with an N outside the valid range for PA's Until
     /// limit count (strictly positive, fits in u32). Raised at resolve time
     /// because the parser accepts any int literal.
-    InvalidUntilLimit { value: i64, span: Span },
+    InvalidUntilLimit {
+        value: i64,
+        span: Span,
+    },
     /// A `scope <name>` or `raw <name>` block declared a name that was
     /// already registered as a handler target earlier in the program. The
     /// previous declaration would silently be shadowed in the registry,
     /// which would misroute any later `on <status> <name>` handler.
     /// Both kinds share one namespace.
-    DuplicateHandlerTarget { name: String, span: Span },
+    DuplicateHandlerTarget {
+        name: String,
+        span: Span,
+    },
 }
 
 impl ResolveError {
@@ -278,10 +307,7 @@ impl fmt::Display for ResolveError {
                 )
             }
             ResolveError::CannotAssignToImmutable { name, .. } => {
-                write!(
-                    f,
-                    "cannot assign to `{name}`: `let` bindings are immutable"
-                )
+                write!(f, "cannot assign to `{name}`: `let` bindings are immutable")
             }
             ResolveError::NestedVarDeclaration { name, .. } => {
                 write!(
@@ -380,7 +406,12 @@ fn resolve_statements(
 
     for stmt in statements {
         let (action_name, kind, stmt_span) = match stmt {
-            Stmt::VarDecl { name, name_span, ty, value } => {
+            Stmt::VarDecl {
+                name,
+                name_span,
+                ty,
+                value,
+            } => {
                 if !top_level {
                     return Err(ResolveError::NestedVarDeclaration {
                         name: name.clone(),
@@ -404,7 +435,11 @@ fn resolve_statements(
                 };
                 (action_name, kind, *name_span)
             }
-            Stmt::Let { name, name_span, value } => {
+            Stmt::Let {
+                name,
+                name_span,
+                value,
+            } => {
                 if env.contains_key(name) {
                     return Err(ResolveError::DuplicateVariable {
                         name: name.clone(),
@@ -412,7 +447,8 @@ fn resolve_statements(
                     });
                 }
                 let value = resolve_expr(value, env)?;
-                let action_name = unique_name(&format!("{}_{name}", key_prefix::COMPOSE), name_counts);
+                let action_name =
+                    unique_name(&format!("{}_{name}", key_prefix::COMPOSE), name_counts);
                 env.insert(
                     name.clone(),
                     Binding::Let {
@@ -428,7 +464,12 @@ fn resolve_statements(
                     *name_span,
                 )
             }
-            Stmt::Assign { name, name_span, op, value } => {
+            Stmt::Assign {
+                name,
+                name_span,
+                op,
+                value,
+            } => {
                 let value = resolve_expr(value, env)?;
                 match env.get(name) {
                     Some(Binding::Var { ty }) => {
@@ -494,12 +535,24 @@ fn resolve_statements(
                 // at workflow root, which PA rejects on import.
                 let saved_env = env.clone();
                 let saved_named_scopes = named_scopes.clone();
-                let true_actions =
-                    resolve_statements(true_branch, env, name_counts, named_scopes, declared_targets, false)?;
+                let true_actions = resolve_statements(
+                    true_branch,
+                    env,
+                    name_counts,
+                    named_scopes,
+                    declared_targets,
+                    false,
+                )?;
                 *env = saved_env.clone();
                 *named_scopes = saved_named_scopes.clone();
-                let false_actions =
-                    resolve_statements(false_branch, env, name_counts, named_scopes, declared_targets, false)?;
+                let false_actions = resolve_statements(
+                    false_branch,
+                    env,
+                    name_counts,
+                    named_scopes,
+                    declared_targets,
+                    false,
+                )?;
                 *env = saved_env;
                 *named_scopes = saved_named_scopes;
                 (
@@ -531,8 +584,14 @@ fn resolve_statements(
                         action_name: action_name.clone(),
                     },
                 );
-                let body_actions =
-                    resolve_statements(body, env, name_counts, named_scopes, declared_targets, false)?;
+                let body_actions = resolve_statements(
+                    body,
+                    env,
+                    name_counts,
+                    named_scopes,
+                    declared_targets,
+                    false,
+                )?;
                 *env = saved_env;
                 *named_scopes = saved_named_scopes;
                 (
@@ -549,7 +608,10 @@ fn resolve_statements(
                 let mut resolved_args = Vec::with_capacity(args.len());
                 for arg in args {
                     let expr = resolve_expr(&arg.expr, env)?;
-                    resolved_args.push(DebugArg { expr, span: arg.span });
+                    resolved_args.push(DebugArg {
+                        expr,
+                        span: arg.span,
+                    });
                 }
                 (
                     String::new(),
@@ -589,7 +651,14 @@ fn resolve_statements(
                 // same as foreach/if-branches.
                 let saved_env = env.clone();
                 let saved_named_scopes = named_scopes.clone();
-                let body_actions = resolve_statements(body, env, name_counts, named_scopes, declared_targets, false)?;
+                let body_actions = resolve_statements(
+                    body,
+                    env,
+                    name_counts,
+                    named_scopes,
+                    declared_targets,
+                    false,
+                )?;
                 *env = saved_env;
                 *named_scopes = saved_named_scopes;
                 (
@@ -639,7 +708,14 @@ fn resolve_statements(
                 // registered *inside* the body get rolled back.
                 let saved_env = env.clone();
                 let saved_named_scopes = named_scopes.clone();
-                let body_actions = resolve_statements(body, env, name_counts, named_scopes, declared_targets, false)?;
+                let body_actions = resolve_statements(
+                    body,
+                    env,
+                    name_counts,
+                    named_scopes,
+                    declared_targets,
+                    false,
+                )?;
                 *env = saved_env;
                 *named_scopes = saved_named_scopes;
                 (action_name, ActionKind::Scope { body: body_actions }, *span)
@@ -676,13 +752,19 @@ fn resolve_statements(
                     .map(|s| s.as_label())
                     .collect::<Vec<_>>()
                     .join("_");
-                let action_name =
-                    unique_name(&format!("On_{labels}_{target}"), name_counts);
+                let action_name = unique_name(&format!("On_{labels}_{target}"), name_counts);
                 // Handler body scopes its own registrations like any other
                 // block. Same rationale as Condition/Foreach/Until.
                 let saved_env = env.clone();
                 let saved_named_scopes = named_scopes.clone();
-                let body_actions = resolve_statements(body, env, name_counts, named_scopes, declared_targets, false)?;
+                let body_actions = resolve_statements(
+                    body,
+                    env,
+                    name_counts,
+                    named_scopes,
+                    declared_targets,
+                    false,
+                )?;
                 *env = saved_env;
                 *named_scopes = saved_named_scopes;
                 (
@@ -715,7 +797,14 @@ fn resolve_statements(
                     let case_action_name = unique_name("Case", name_counts);
                     *env = saved_env.clone();
                     *named_scopes = saved_named_scopes.clone();
-                    let body = resolve_statements(&case.body, env, name_counts, named_scopes, declared_targets, false)?;
+                    let body = resolve_statements(
+                        &case.body,
+                        env,
+                        name_counts,
+                        named_scopes,
+                        declared_targets,
+                        false,
+                    )?;
                     resolved_cases.push(ResolvedSwitchCase {
                         action_name: case_action_name,
                         value: case.value.clone(),
@@ -726,7 +815,14 @@ fn resolve_statements(
                     Some(stmts) => {
                         *env = saved_env.clone();
                         *named_scopes = saved_named_scopes.clone();
-                        Some(resolve_statements(stmts, env, name_counts, named_scopes, declared_targets, false)?)
+                        Some(resolve_statements(
+                            stmts,
+                            env,
+                            name_counts,
+                            named_scopes,
+                            declared_targets,
+                            false,
+                        )?)
                     }
                     None => None,
                 };
@@ -743,7 +839,11 @@ fn resolve_statements(
                     *span,
                 )
             }
-            Stmt::Terminate { status, message, span } => {
+            Stmt::Terminate {
+                status,
+                message,
+                span,
+            } => {
                 let resolved_message = match message {
                     Some(m) => Some(resolve_expr(m, env)?),
                     None => None,
@@ -914,7 +1014,9 @@ fn resolve_expr(expr: &Expr, env: &HashMap<String, Binding>) -> Result<Expr, Res
                 field: field.clone(),
             })
         }
-        Expr::VarRef { .. } | Expr::ComposeRef { .. } | Expr::IteratorRef { .. } => Ok(expr.clone()),
+        Expr::VarRef { .. } | Expr::ComposeRef { .. } | Expr::IteratorRef { .. } => {
+            Ok(expr.clone())
+        }
         Expr::BinaryOp { op, lhs, rhs } => {
             let lhs = resolve_expr(lhs, env)?;
             let rhs = resolve_expr(rhs, env)?;
@@ -1210,7 +1312,13 @@ mod tests {
 
     #[test]
     fn concat_assign_rejects_non_string() {
-        for ty in [Type::Int, Type::Float, Type::Bool, Type::Array, Type::Object] {
+        for ty in [
+            Type::Int,
+            Type::Float,
+            Type::Bool,
+            Type::Array,
+            Type::Object,
+        ] {
             let prog = Program {
                 trigger: Trigger::Manual,
                 statements: vec![
@@ -1260,7 +1368,11 @@ mod tests {
     fn assign_to_undefined_is_error() {
         let prog = Program {
             trigger: Trigger::Manual,
-            statements: vec![assign("nope", AssignOp::Set, Expr::Literal(Literal::Int(1)))],
+            statements: vec![assign(
+                "nope",
+                AssignOp::Set,
+                Expr::Literal(Literal::Int(1)),
+            )],
         };
         assert!(matches!(
             resolve(&prog).unwrap_err(),
@@ -1293,7 +1405,10 @@ mod tests {
         };
         let resolved = resolve(&prog).unwrap();
         assert_eq!(resolved.actions[0].name, "Compose_doubled");
-        assert!(matches!(resolved.actions[0].kind, ActionKind::Compose { .. }));
+        assert!(matches!(
+            resolved.actions[0].kind,
+            ActionKind::Compose { .. }
+        ));
     }
 
     #[test]
@@ -1314,7 +1429,9 @@ mod tests {
         let var_action = &resolved.actions[1];
         match &var_action.kind {
             ActionKind::InitializeVariable { value, .. } => {
-                assert!(matches!(value, Expr::ComposeRef { action_name, .. } if action_name == "Compose_total"));
+                assert!(
+                    matches!(value, Expr::ComposeRef { action_name, .. } if action_name == "Compose_total")
+                );
             }
             _ => panic!("expected InitializeVariable"),
         }
@@ -1384,10 +1501,7 @@ mod tests {
                 Stmt::If {
                     condition: rref("flag"),
                     condition_span: sp(),
-                    true_branch: vec![let_stmt(
-                        "inner",
-                        Expr::Literal(Literal::Int(1)),
-                    )],
+                    true_branch: vec![let_stmt("inner", Expr::Literal(Literal::Int(1)))],
                     false_branch: vec![],
                 },
                 // Reference `inner` from outer scope: should fail, because
@@ -1410,14 +1524,8 @@ mod tests {
                 Stmt::If {
                     condition: rref("flag"),
                     condition_span: sp(),
-                    true_branch: vec![let_stmt(
-                        "inner",
-                        Expr::Literal(Literal::Int(1)),
-                    )],
-                    false_branch: vec![let_stmt(
-                        "copy",
-                        rref("inner"),
-                    )],
+                    true_branch: vec![let_stmt("inner", Expr::Literal(Literal::Int(1)))],
+                    false_branch: vec![let_stmt("copy", rref("inner"))],
                 },
             ],
         };
@@ -1436,10 +1544,7 @@ mod tests {
                 Stmt::Foreach {
                     iter: "x".to_string(),
                     collection: rref("items"),
-                    body: vec![let_stmt(
-                        "per_item",
-                        Expr::Literal(Literal::Int(1)),
-                    )],
+                    body: vec![let_stmt("per_item", Expr::Literal(Literal::Int(1)))],
                     span: sp(),
                 },
                 let_stmt("leak", rref("per_item")),
@@ -1462,10 +1567,7 @@ mod tests {
                 Stmt::If {
                     condition: Expr::Literal(Literal::Bool(true)),
                     condition_span: sp(),
-                    true_branch: vec![let_stmt(
-                        "copy",
-                        rref("outer"),
-                    )],
+                    true_branch: vec![let_stmt("copy", rref("outer"))],
                     false_branch: vec![],
                 },
             ],
@@ -1632,8 +1734,7 @@ mod tests {
         assert_eq!(resolved.actions[2].name, "Initialize_after");
         assert_eq!(resolved.actions[2].run_after.len(), 1);
         assert_eq!(
-            resolved.actions[2].run_after[0].action_name,
-            "Scope_work",
+            resolved.actions[2].run_after[0].action_name, "Scope_work",
             "next action must chain to the scope, not the handler"
         );
     }
@@ -1866,8 +1967,7 @@ mod tests {
         // any Token::Int(n) for `max N`, so zero and negatives make it to
         // the resolver. This asserts the resolver's range check fires and
         // that the error span is the `max 0` clause (not the whole statement).
-        let err = resolve_source("var n: int = 0\nuntil n > 5 max 0 { n += 1 }")
-            .unwrap_err();
+        let err = resolve_source("var n: int = 0\nuntil n > 5 max 0 { n += 1 }").unwrap_err();
         assert!(matches!(
             err,
             ResolveError::InvalidUntilLimit { value: 0, .. }
@@ -1875,10 +1975,7 @@ mod tests {
         // Span should come from the `0` literal (the limit-count span set
         // by the parser), not the statement span fallback.
         let span = err.span();
-        assert!(
-            span.end > span.start,
-            "span should be non-empty"
-        );
+        assert!(span.end > span.start, "span should be non-empty");
     }
 
     #[test]
@@ -1924,14 +2021,15 @@ mod tests {
         assert_eq!(resolved.actions[0].name, "HTTP_Call");
         assert_eq!(resolved.actions[1].name, "On_failed_HTTP_Call");
         match &resolved.actions[1].kind {
-            ActionKind::OnHandler { target_action_name, .. } => {
+            ActionKind::OnHandler {
+                target_action_name, ..
+            } => {
                 assert_eq!(target_action_name, "HTTP_Call");
             }
             _ => panic!("expected OnHandler"),
         }
         assert_eq!(
-            resolved.actions[1].run_after[0].action_name,
-            "HTTP_Call",
+            resolved.actions[1].run_after[0].action_name, "HTTP_Call",
             "runAfter points at the raw block by its PA action name"
         );
     }
@@ -2144,10 +2242,7 @@ mod tests {
     fn var_and_let_share_namespace() {
         let prog = Program {
             trigger: Trigger::Manual,
-            statements: vec![
-                var("x"),
-                let_stmt("x", Expr::Literal(Literal::Int(1))),
-            ],
+            statements: vec![var("x"), let_stmt("x", Expr::Literal(Literal::Int(1)))],
         };
         assert!(matches!(
             resolve(&prog).unwrap_err(),

@@ -47,10 +47,7 @@ impl Diagnostic {
             .as_ref()
             .map(|(r, label)| (bytes_to_chars(src, r.clone()), label.clone()));
 
-        let offset = primary_chars
-            .as_ref()
-            .map(|(r, _)| r.start)
-            .unwrap_or(0);
+        let offset = primary_chars.as_ref().map(|(r, _)| r.start).unwrap_or(0);
 
         let mut builder = Report::build(ReportKind::Error, (filename, offset..offset))
             .with_message(&self.message);
@@ -67,9 +64,7 @@ impl Diagnostic {
             builder = builder.with_note(note);
         }
 
-        let _ = builder
-            .finish()
-            .eprint((filename, Source::from(src)));
+        let _ = builder.finish().eprint((filename, Source::from(src)));
     }
 }
 
@@ -104,11 +99,7 @@ pub fn from_parse_error<'src>(err: &Rich<'_, Token<'src>, Span>) -> Diagnostic {
 /// is used if present; otherwise the report renders with just the header.
 pub fn from_interpret_error(err: &crate::interpreter::InterpretError) -> Diagnostic {
     match err.span {
-        Some(span) => Diagnostic::spanned(
-            format!("runtime error: {}", err.message),
-            span,
-            "here",
-        ),
+        Some(span) => Diagnostic::spanned(format!("runtime error: {}", err.message), span, "here"),
         None => Diagnostic {
             message: format!("runtime error: {}", err.message),
             primary: None,

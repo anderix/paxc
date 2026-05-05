@@ -125,12 +125,13 @@ pub fn lexer<'src>()
     // tail is `or_not` so `obj.field` and `3.foo` still tokenize as int + dot
     // + rest (or_not rewinds when `.` is present but no digits follow).
     let fraction = just('.').then(text::digits(10)).to_slice();
-    let number = text::int(10)
-        .then(fraction.or_not())
-        .map(|(int_part, frac): (&str, Option<&str>)| match frac {
-            Some(frac) => Token::Float(format!("{int_part}{frac}").parse::<f64>().unwrap()),
-            None => Token::Int(int_part.parse::<i64>().unwrap()),
-        });
+    let number =
+        text::int(10)
+            .then(fraction.or_not())
+            .map(|(int_part, frac): (&str, Option<&str>)| match frac {
+                Some(frac) => Token::Float(format!("{int_part}{frac}").parse::<f64>().unwrap()),
+                None => Token::Int(int_part.parse::<i64>().unwrap()),
+            });
 
     let escape = just('\\').ignore_then(choice((
         just('n').to('\n'),
@@ -276,19 +277,11 @@ mod tests {
     fn slice6_compound_assign_ops() {
         assert_eq!(
             lex("counter += 1"),
-            vec![
-                Token::Ident("counter"),
-                Token::PlusEq,
-                Token::Int(1),
-            ]
+            vec![Token::Ident("counter"), Token::PlusEq, Token::Int(1),]
         );
         assert_eq!(
             lex("counter -= 1"),
-            vec![
-                Token::Ident("counter"),
-                Token::MinusEq,
-                Token::Int(1),
-            ]
+            vec![Token::Ident("counter"), Token::MinusEq, Token::Int(1),]
         );
     }
 
@@ -312,8 +305,14 @@ mod tests {
             other => panic!("expected single float token, got {other:?}"),
         }
         // Trailing `.` with no digits stays int + dot (member-access path).
-        assert_eq!(lex("obj.field"), vec![Token::Ident("obj"), Token::Dot, Token::Ident("field")]);
-        assert_eq!(lex("3.foo"), vec![Token::Int(3), Token::Dot, Token::Ident("foo")]);
+        assert_eq!(
+            lex("obj.field"),
+            vec![Token::Ident("obj"), Token::Dot, Token::Ident("field")]
+        );
+        assert_eq!(
+            lex("3.foo"),
+            vec![Token::Int(3), Token::Dot, Token::Ident("foo")]
+        );
     }
 
     #[test]
@@ -326,7 +325,8 @@ mod tests {
 
     #[test]
     fn skips_line_comment() {
-        assert_eq!(lex("// hello\nvar x: int = 42"),
+        assert_eq!(
+            lex("// hello\nvar x: int = 42"),
             vec![
                 Token::Var,
                 Token::Ident("x"),

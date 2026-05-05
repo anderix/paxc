@@ -108,3 +108,50 @@ pub fn is_known_function(name: &str) -> bool {
         | "utcNow" | "formatDateTime"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interpreter::evaluated_function_names;
+
+    /// `is_known_function` must be a superset of the names paxr actually
+    /// evaluates -- otherwise a real function call would yield a misleading
+    /// "did you mean to call it?" hint or no hint at all. The registry
+    /// refactor will replace both the matches! list above and the interpreter
+    /// dispatch with one FunctionDef table; this test continues to enforce
+    /// the invariant either way.
+    #[test]
+    fn is_known_function_is_superset_of_evaluated_set() {
+        for name in evaluated_function_names() {
+            assert!(
+                is_known_function(name),
+                "evaluated function `{name}` is missing from is_known_function()"
+            );
+        }
+    }
+
+    /// PA accessors and known-but-unimplemented function names are part of
+    /// the diagnostic surface. The refactor must not drop them.
+    #[test]
+    fn is_known_function_covers_accessors_and_stubs() {
+        // Pure accessors (PA expression-prefix names users sometimes call
+        // bare). Not evaluated by paxr; included for the "did you mean"
+        // hint surface only.
+        for name in [
+            "body",
+            "items",
+            "outputs",
+            "variables",
+            "parameters",
+            "triggerBody",
+            "triggerOutputs",
+        ] {
+            assert!(is_known_function(name), "accessor `{name}` missing");
+        }
+        // Real PA functions paxr does not yet evaluate. Listed so users get
+        // the call-site hint when they typo or call them bare.
+        for name in ["utcNow", "formatDateTime"] {
+            assert!(is_known_function(name), "known stub `{name}` missing");
+        }
+    }
+}

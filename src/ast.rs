@@ -98,10 +98,7 @@ pub enum Stmt {
     /// `debug(args)` diagnostic. paxc drops these with an end-of-compile note;
     /// paxr evaluates them and prints `debug: <source>=value at line X`. The
     /// span covers the whole statement so paxr can recover the line number.
-    Debug {
-        args: Vec<DebugArg>,
-        span: Span,
-    },
+    Debug { args: Vec<DebugArg>, span: Span },
     /// `terminate <status> [message]` early-exit. `message` is only valid when
     /// status is `Failed` (parser-enforced). Compiles to PA's `Terminate`
     /// action; paxr halts execution on reaching it.
@@ -316,15 +313,24 @@ pub enum Expr {
     Literal(Literal),
     /// Unresolved identifier reference emitted by the parser. The resolver
     /// rewrites each occurrence into either `VarRef` or `ComposeRef`.
-    Ref { name: String, span: Span },
+    Ref {
+        name: String,
+        span: Span,
+    },
     /// Reference to a pax variable. Emits `@{variables('x')}`. Span is the
     /// originating identifier in source, preserved through resolve so
     /// runtime errors at this ref point at the exact name in the source.
-    VarRef { name: String, span: Span },
+    VarRef {
+        name: String,
+        span: Span,
+    },
     /// Reference to a `let` binding. `action_name` is the Compose action key
     /// the resolver assigned to it. Emits `@{outputs('Compose_x')}`. Span
     /// is the originating identifier in source.
-    ComposeRef { action_name: String, span: Span },
+    ComposeRef {
+        action_name: String,
+        span: Span,
+    },
     /// Member access `target.field`. Chains via nested Member nodes.
     Member {
         target: Box<Expr>,
@@ -333,7 +339,10 @@ pub enum Expr {
     /// Reference to a foreach iterator. `action_name` is the `Apply_to_each`
     /// action key the iterator belongs to. Emits `items('action_name')`.
     /// Span is the originating identifier in source.
-    IteratorRef { action_name: String, span: Span },
+    IteratorRef {
+        action_name: String,
+        span: Span,
+    },
     /// Binary operator expression. Emits as a PA function call, e.g. `&` → `concat(lhs, rhs)`.
     BinaryOp {
         op: BinOp,

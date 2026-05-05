@@ -388,10 +388,7 @@ impl<'src> Interpreter<'src> {
                     _ => return Err(err(format!("variable {var} is not a string"))),
                 };
                 let new = Value::Str(current + &suffix);
-                self.trace(&format!(
-                    "append_string {var} = {}",
-                    new.display_compact()
-                ));
+                self.trace(&format!("append_string {var} = {}", new.display_compact()));
                 self.vars.insert(var.clone(), new);
             }
             ActionKind::AppendToArrayVariable { var, value } => {
@@ -402,10 +399,7 @@ impl<'src> Interpreter<'src> {
                 };
                 arr.push(item);
                 let new = Value::Array(arr);
-                self.trace(&format!(
-                    "append_array {var} = {}",
-                    new.display_compact()
-                ));
+                self.trace(&format!("append_array {var} = {}", new.display_compact()));
                 self.vars.insert(var.clone(), new);
             }
             ActionKind::Compose { name, value } => {
@@ -448,11 +442,7 @@ impl<'src> Interpreter<'src> {
                     Value::Array(items) => items,
                     _ => return Err(err("foreach requires an array")),
                 };
-                self.trace(&format!(
-                    "foreach {} ({} items)",
-                    action.name,
-                    items.len()
-                ));
+                self.trace(&format!("foreach {} ({} items)", action.name, items.len()));
                 for (idx, item) in items.into_iter().enumerate() {
                     self.iterators.insert(action.name.clone(), item.clone());
                     self.indent += 1;
@@ -524,9 +514,7 @@ impl<'src> Interpreter<'src> {
                         break;
                     }
                     let exit = self.eval(condition)?.as_bool().unwrap_or(false);
-                    self.trace(&format!(
-                        "until? ({source}) = {exit}"
-                    ));
+                    self.trace(&format!("until? ({source}) = {exit}"));
                     if exit {
                         break;
                     }
@@ -635,16 +623,14 @@ impl<'src> Interpreter<'src> {
                         *span,
                     )
                 }),
-            Expr::IteratorRef { action_name, span } => self
-                .iterators
-                .get(action_name)
-                .cloned()
-                .ok_or_else(|| {
+            Expr::IteratorRef { action_name, span } => {
+                self.iterators.get(action_name).cloned().ok_or_else(|| {
                     err_at(
                         format!("iterator {action_name} has no current value"),
                         *span,
                     )
-                }),
+                })
+            }
             Expr::Member { target, field } => {
                 let target_val = self.eval(target)?;
                 match target_val {
@@ -917,8 +903,8 @@ fn eval_call(name: &str, args: Vec<Value>) -> (Value, bool) {
             Some(b) => Value::Bool(!b),
             None => Value::Null,
         },
-        "and" => binary_bool(&args, |a, b| a && b),
-        "or" => binary_bool(&args, |a, b| a || b),
+        "and" => fold_bool(&args, |a, b| a && b),
+        "or" => fold_bool(&args, |a, b| a || b),
 
         // --- string ---
         "concat" => {
@@ -981,7 +967,11 @@ fn eval_call(name: &str, args: Vec<Value>) -> (Value, bool) {
         "string" if args.len() == 1 => Value::Str(args[0].coerce_str()),
         "int" if args.len() == 1 => match &args[0] {
             Value::Int(n) => Value::Int(*n),
-            Value::Str(s) => s.trim().parse::<i64>().map(Value::Int).unwrap_or(Value::Null),
+            Value::Str(s) => s
+                .trim()
+                .parse::<i64>()
+                .map(Value::Int)
+                .unwrap_or(Value::Null),
             Value::Bool(b) => Value::Int(if *b { 1 } else { 0 }),
             _ => Value::Null,
         },
@@ -1042,6 +1032,65 @@ fn eval_call(name: &str, args: Vec<Value>) -> (Value, bool) {
     (v, false)
 }
 
+/// The exact set of PA expression function names paxr evaluates locally.
+/// Stable handle for tests that pin function-library coverage. Kept in sync
+/// with `eval_call`'s match arms by hand today; once the registry refactor
+/// lands, this returns the names from the FunctionDef table directly.
+pub fn evaluated_function_names() -> &'static [&'static str] {
+    &[
+        // arithmetic / numeric
+        "add",
+        "sub",
+        "mul",
+        "div",
+        "mod",
+        "min",
+        "max",
+        "range",
+        // comparison / logic
+        "coalesce",
+        "equals",
+        "less",
+        "lessOrEquals",
+        "greater",
+        "greaterOrEquals",
+        "not",
+        "and",
+        "or",
+        // string
+        "concat",
+        "toUpper",
+        "toLower",
+        "trim",
+        "substring",
+        "indexOf",
+        "lastIndexOf",
+        "startsWith",
+        "endsWith",
+        "replace",
+        "split",
+        "join",
+        // URI encoding
+        "uriComponent",
+        "uriComponentToString",
+        // conversion / identity
+        "string",
+        "int",
+        "bool",
+        "guid",
+        "createArray",
+        // polymorphic
+        "length",
+        "empty",
+        "contains",
+        // array
+        "first",
+        "last",
+        "skip",
+        "take",
+    ]
+}
+
 fn substring_fn(args: &[Value]) -> Value {
     if !(args.len() == 2 || args.len() == 3) {
         return Value::Null;
@@ -1079,7 +1128,11 @@ fn index_of_ci(haystack: &Value, needle: &Value, from_end: bool) -> Value {
     }
     let hl = h.to_lowercase();
     let nl = n.to_lowercase();
-    let byte_idx = if from_end { hl.rfind(&nl) } else { hl.find(&nl) };
+    let byte_idx = if from_end {
+        hl.rfind(&nl)
+    } else {
+        hl.find(&nl)
+    };
     match byte_idx {
         Some(b) => Value::Int(hl[..b].chars().count() as i64),
         None => Value::Int(-1),
@@ -1093,7 +1146,11 @@ fn string_boundary_ci(haystack: &Value, needle: &Value, is_start: bool) -> Value
     };
     let hl = h.to_lowercase();
     let nl = n.to_lowercase();
-    let result = if is_start { hl.starts_with(&nl) } else { hl.ends_with(&nl) };
+    let result = if is_start {
+        hl.starts_with(&nl)
+    } else {
+        hl.ends_with(&nl)
+    };
     Value::Bool(result)
 }
 
@@ -1227,13 +1284,25 @@ fn binary_cmp<F: Fn(i64, i64) -> bool>(args: &[Value], f: F) -> Value {
     Value::Null
 }
 
-fn binary_bool<F: Fn(bool, bool) -> bool>(args: &[Value], f: F) -> Value {
-    if args.len() == 2
-        && let (Some(a), Some(b)) = (args[0].as_bool(), args[1].as_bool())
-    {
-        return Value::Bool(f(a, b));
+/// Variadic boolean fold for `and` / `or`. PA's semantics:
+/// zero args → null (no identity element baked in), one arg → the arg
+/// as-is, two-or-more → fold left with `f`. Any non-boolean argument
+/// short-circuits to null.
+fn fold_bool<F: Fn(bool, bool) -> bool>(args: &[Value], f: F) -> Value {
+    if args.is_empty() {
+        return Value::Null;
     }
-    Value::Null
+    let mut acc = match args[0].as_bool() {
+        Some(b) => b,
+        None => return Value::Null,
+    };
+    for v in &args[1..] {
+        match v.as_bool() {
+            Some(b) => acc = f(acc, b),
+            None => return Value::Null,
+        }
+    }
+    Value::Bool(acc)
 }
 
 fn span_to_line(src: &str, byte_offset: usize) -> usize {
@@ -1324,21 +1393,21 @@ mod tests {
     fn slice22_state_dump_excludes_nested_lets() {
         // `let inner = ...` inside the if-branch must not appear in the
         // top-level state dump.
-        let state = run(
-            "var x: int = 1\nif x == 1 {\n  let inner = 99\n}\nlet outer = x",
-        )
-        .unwrap();
+        let state = run("var x: int = 1\nif x == 1 {\n  let inner = 99\n}\nlet outer = x").unwrap();
         let dump = format_state_dump(&state);
-        assert!(!dump.contains("inner"), "nested let leaked into dump:\n{dump}");
-        assert!(dump.contains("outer (let) = 1"), "missing outer binding:\n{dump}");
+        assert!(
+            !dump.contains("inner"),
+            "nested let leaked into dump:\n{dump}"
+        );
+        assert!(
+            dump.contains("outer (let) = 1"),
+            "missing outer binding:\n{dump}"
+        );
     }
 
     #[test]
     fn slice22_state_dump_renders_composites_as_pretty_json() {
-        let state = run(
-            "var empty_arr: array = []\nvar obj: object = { \"a\": 1 }",
-        )
-        .unwrap();
+        let state = run("var empty_arr: array = []\nvar obj: object = { \"a\": 1 }").unwrap();
         let dump = format_state_dump(&state);
         // Empty composites inline.
         assert!(dump.contains("empty_arr (var array) = []"));
@@ -1371,10 +1440,7 @@ mod tests {
     fn terminate_inside_if_branch_halts_top_level() {
         // Halting inside a nested `if` body propagates up: statements after
         // the enclosing `if` do not execute.
-        let state = run(
-            "var x: int = 0\nif x == 0 { terminate succeeded }\nx = 42",
-        )
-        .unwrap();
+        let state = run("var x: int = 0\nif x == 0 { terminate succeeded }\nx = 42").unwrap();
         assert_eq!(state.vars.get("x").and_then(Value::as_int), Some(0));
     }
 
@@ -1424,9 +1490,18 @@ mod tests {
     #[test]
     fn slice31_equals_is_numeric_across_int_and_float() {
         // 5 == 5.0 -> true (paxr's documented happy-path divergence from PA).
-        assert!(matches!(eval_let("let eq = 5 == 5.0", "eq"), Value::Bool(true)));
-        assert!(matches!(eval_let("let eq = 5.0 == 5", "eq"), Value::Bool(true)));
-        assert!(matches!(eval_let("let eq = 5.5 == 5", "eq"), Value::Bool(false)));
+        assert!(matches!(
+            eval_let("let eq = 5 == 5.0", "eq"),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            eval_let("let eq = 5.0 == 5", "eq"),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            eval_let("let eq = 5.5 == 5", "eq"),
+            Value::Bool(false)
+        ));
     }
 
     #[test]
@@ -1470,14 +1545,21 @@ mod tests {
 
     #[test]
     fn fn_string_case_and_trim() {
-        assert!(matches!(eval_let(r#"let x = toUpper("hello")"#, "x"), Value::Str(s) if s == "HELLO"));
-        assert!(matches!(eval_let(r#"let x = toLower("HeLLo")"#, "x"), Value::Str(s) if s == "hello"));
+        assert!(
+            matches!(eval_let(r#"let x = toUpper("hello")"#, "x"), Value::Str(s) if s == "HELLO")
+        );
+        assert!(
+            matches!(eval_let(r#"let x = toLower("HeLLo")"#, "x"), Value::Str(s) if s == "hello")
+        );
         assert!(matches!(eval_let(r#"let x = trim("  hi  ")"#, "x"), Value::Str(s) if s == "hi"));
     }
 
     #[test]
     fn fn_length_polymorphic() {
-        assert!(matches!(eval_let(r#"let x = length("hello")"#, "x"), Value::Int(5)));
+        assert!(matches!(
+            eval_let(r#"let x = length("hello")"#, "x"),
+            Value::Int(5)
+        ));
         assert!(matches!(
             eval_let("var a: array = [1, 2, 3]\nlet x = length(a)", "x"),
             Value::Int(3)
@@ -1493,29 +1575,56 @@ mod tests {
 
     #[test]
     fn fn_empty_polymorphic() {
-        assert!(matches!(eval_let(r#"let x = empty("")"#, "x"), Value::Bool(true)));
-        assert!(matches!(eval_let(r#"let x = empty("hi")"#, "x"), Value::Bool(false)));
+        assert!(matches!(
+            eval_let(r#"let x = empty("")"#, "x"),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            eval_let(r#"let x = empty("hi")"#, "x"),
+            Value::Bool(false)
+        ));
         assert!(matches!(
             eval_let("var a: array = []\nlet x = empty(a)", "x"),
             Value::Bool(true)
+        ));
+        // Object case: polymorphism extends to objects too.
+        assert!(matches!(
+            eval_let("var o: object = {}\nlet x = empty(o)", "x"),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            eval_let("var o: object = { \"a\": 1 }\nlet x = empty(o)", "x"),
+            Value::Bool(false)
         ));
     }
 
     #[test]
     fn fn_contains_string_case_sensitive() {
         // PA's string contains is case-sensitive.
-        assert!(matches!(eval_let(r#"let x = contains("hello world", "WORLD")"#, "x"), Value::Bool(false)));
-        assert!(matches!(eval_let(r#"let x = contains("hello world", "world")"#, "x"), Value::Bool(true)));
+        assert!(matches!(
+            eval_let(r#"let x = contains("hello world", "WORLD")"#, "x"),
+            Value::Bool(false)
+        ));
+        assert!(matches!(
+            eval_let(r#"let x = contains("hello world", "world")"#, "x"),
+            Value::Bool(true)
+        ));
     }
 
     #[test]
     fn fn_contains_array_membership() {
         assert!(matches!(
-            eval_let("var a: array = [\"x\", \"y\", \"z\"]\nlet r = contains(a, \"y\")", "r"),
+            eval_let(
+                "var a: array = [\"x\", \"y\", \"z\"]\nlet r = contains(a, \"y\")",
+                "r"
+            ),
             Value::Bool(true)
         ));
         assert!(matches!(
-            eval_let("var a: array = [\"x\", \"y\", \"z\"]\nlet r = contains(a, \"q\")", "r"),
+            eval_let(
+                "var a: array = [\"x\", \"y\", \"z\"]\nlet r = contains(a, \"q\")",
+                "r"
+            ),
             Value::Bool(false)
         ));
     }
@@ -1523,28 +1632,66 @@ mod tests {
     #[test]
     fn fn_starts_and_ends_with_case_insensitive() {
         // PA quirk: these are case-insensitive.
-        assert!(matches!(eval_let(r#"let x = startsWith("Hello", "HE")"#, "x"), Value::Bool(true)));
-        assert!(matches!(eval_let(r#"let x = endsWith("WORLD", "rld")"#, "x"), Value::Bool(true)));
+        assert!(matches!(
+            eval_let(r#"let x = startsWith("Hello", "HE")"#, "x"),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            eval_let(r#"let x = endsWith("WORLD", "rld")"#, "x"),
+            Value::Bool(true)
+        ));
+        // Symmetric direction: uppercase haystack and lowercase needle also match.
+        assert!(matches!(
+            eval_let(r#"let x = startsWith("HELLO", "hello")"#, "x"),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            eval_let(r#"let x = endsWith("hello", "LO")"#, "x"),
+            Value::Bool(true)
+        ));
     }
 
     #[test]
     fn fn_index_of_case_insensitive_char_index() {
-        assert!(matches!(eval_let(r#"let x = indexOf("Hello World", "WORLD")"#, "x"), Value::Int(6)));
-        assert!(matches!(eval_let(r#"let x = indexOf("abc", "z")"#, "x"), Value::Int(-1)));
-        assert!(matches!(eval_let(r#"let x = lastIndexOf("a-b-c", "-")"#, "x"), Value::Int(3)));
+        assert!(matches!(
+            eval_let(r#"let x = indexOf("Hello World", "WORLD")"#, "x"),
+            Value::Int(6)
+        ));
+        assert!(matches!(
+            eval_let(r#"let x = indexOf("abc", "z")"#, "x"),
+            Value::Int(-1)
+        ));
+        assert!(matches!(
+            eval_let(r#"let x = lastIndexOf("a-b-c", "-")"#, "x"),
+            Value::Int(3)
+        ));
+        // lastIndexOf with a mixed-case haystack confirms the case-insensitive
+        // behavior (the "-" delimiter case above is case-neutral on its own).
+        assert!(matches!(
+            eval_let(r#"let x = lastIndexOf("Banana", "ANA")"#, "x"),
+            Value::Int(3)
+        ));
     }
 
     #[test]
     fn fn_substring_two_and_three_arg() {
-        assert!(matches!(eval_let(r#"let x = substring("hello world", 6)"#, "x"), Value::Str(s) if s == "world"));
-        assert!(matches!(eval_let(r#"let x = substring("hello world", 0, 5)"#, "x"), Value::Str(s) if s == "hello"));
+        assert!(
+            matches!(eval_let(r#"let x = substring("hello world", 6)"#, "x"), Value::Str(s) if s == "world")
+        );
+        assert!(
+            matches!(eval_let(r#"let x = substring("hello world", 0, 5)"#, "x"), Value::Str(s) if s == "hello")
+        );
         // Out-of-range start returns empty, not error.
-        assert!(matches!(eval_let(r#"let x = substring("hi", 10)"#, "x"), Value::Str(s) if s.is_empty()));
+        assert!(
+            matches!(eval_let(r#"let x = substring("hi", 10)"#, "x"), Value::Str(s) if s.is_empty())
+        );
     }
 
     #[test]
     fn fn_replace_and_split() {
-        assert!(matches!(eval_let(r#"let x = replace("a-b-c", "-", "_")"#, "x"), Value::Str(s) if s == "a_b_c"));
+        assert!(
+            matches!(eval_let(r#"let x = replace("a-b-c", "-", "_")"#, "x"), Value::Str(s) if s == "a_b_c")
+        );
         let v = eval_let(r#"let x = split("a,b,c", ",")"#, "x");
         match v {
             Value::Array(items) => {
@@ -1593,8 +1740,14 @@ mod tests {
     #[test]
     fn fn_mod_min_max_range() {
         assert!(matches!(eval_let("let x = mod(10, 3)", "x"), Value::Int(1)));
-        assert!(matches!(eval_let("let x = min(3, 1, 2)", "x"), Value::Int(1)));
-        assert!(matches!(eval_let("let x = max(3, 1, 2)", "x"), Value::Int(3)));
+        assert!(matches!(
+            eval_let("let x = min(3, 1, 2)", "x"),
+            Value::Int(1)
+        ));
+        assert!(matches!(
+            eval_let("let x = max(3, 1, 2)", "x"),
+            Value::Int(3)
+        ));
         // min/max also accept a single array argument (PA behavior).
         assert!(matches!(
             eval_let("var a: array = [5, 3, 9, 1]\nlet x = min(a)", "x"),
@@ -1620,10 +1773,18 @@ mod tests {
 
     #[test]
     fn fn_coalesce_returns_first_non_null() {
-        assert!(matches!(eval_let(r#"let x = coalesce(null, null, "hi")"#, "x"), Value::Str(s) if s == "hi"));
-        assert!(matches!(eval_let("let x = coalesce(null, 42, null)", "x"), Value::Int(42)));
+        assert!(
+            matches!(eval_let(r#"let x = coalesce(null, null, "hi")"#, "x"), Value::Str(s) if s == "hi")
+        );
+        assert!(matches!(
+            eval_let("let x = coalesce(null, 42, null)", "x"),
+            Value::Int(42)
+        ));
         // All-null → null.
-        assert!(matches!(eval_let("let x = coalesce(null, null)", "x"), Value::Null));
+        assert!(matches!(
+            eval_let("let x = coalesce(null, null)", "x"),
+            Value::Null
+        ));
     }
 
     #[test]
@@ -1634,6 +1795,11 @@ mod tests {
                 assert!(matches!(&items[0], Value::Str(s) if s == "a"));
                 assert!(matches!(&items[2], Value::Int(3)));
             }
+            _ => panic!("expected array"),
+        }
+        // Zero-arg form returns an empty array (variadic edge).
+        match eval_let("let x = createArray()", "x") {
+            Value::Array(items) => assert!(items.is_empty()),
             _ => panic!("expected array"),
         }
     }
@@ -1648,23 +1814,47 @@ mod tests {
 
     #[test]
     fn fn_int_parses_or_passes_through() {
-        assert!(matches!(eval_let(r#"let x = int("123")"#, "x"), Value::Int(123)));
+        assert!(matches!(
+            eval_let(r#"let x = int("123")"#, "x"),
+            Value::Int(123)
+        ));
         // Whitespace trimmed.
-        assert!(matches!(eval_let(r#"let x = int("  42  ")"#, "x"), Value::Int(42)));
+        assert!(matches!(
+            eval_let(r#"let x = int("  42  ")"#, "x"),
+            Value::Int(42)
+        ));
         // Unparseable → Null (not error).
-        assert!(matches!(eval_let(r#"let x = int("nope")"#, "x"), Value::Null));
+        assert!(matches!(
+            eval_let(r#"let x = int("nope")"#, "x"),
+            Value::Null
+        ));
         // Int passthrough.
         assert!(matches!(eval_let("let x = int(7)", "x"), Value::Int(7)));
     }
 
     #[test]
     fn fn_bool_parses_or_passes_through() {
-        assert!(matches!(eval_let(r#"let x = bool("true")"#, "x"), Value::Bool(true)));
-        assert!(matches!(eval_let(r#"let x = bool("FALSE")"#, "x"), Value::Bool(false)));
-        assert!(matches!(eval_let(r#"let x = bool("1")"#, "x"), Value::Bool(true)));
-        assert!(matches!(eval_let("let x = bool(0)", "x"), Value::Bool(false)));
+        assert!(matches!(
+            eval_let(r#"let x = bool("true")"#, "x"),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            eval_let(r#"let x = bool("FALSE")"#, "x"),
+            Value::Bool(false)
+        ));
+        assert!(matches!(
+            eval_let(r#"let x = bool("1")"#, "x"),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            eval_let("let x = bool(0)", "x"),
+            Value::Bool(false)
+        ));
         // Bogus → Null.
-        assert!(matches!(eval_let(r#"let x = bool("maybe")"#, "x"), Value::Null));
+        assert!(matches!(
+            eval_let(r#"let x = bool("maybe")"#, "x"),
+            Value::Null
+        ));
     }
 
     #[test]
@@ -1687,15 +1877,13 @@ mod tests {
     fn slice30_on_succeeded_handler_runs_in_paxr_happy_path() {
         // paxr assumes every scope succeeds, so an `on succeeded` handler
         // fires locally and its body side-effects are visible.
-        let state = run(
-            r#"var trail: string = ""
+        let state = run(r#"var trail: string = ""
 scope work {
   trail &= "w"
 }
 on succeeded work {
   trail &= "-ok"
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(
             state.vars.get("trail"),
@@ -1707,15 +1895,13 @@ on succeeded work {
     fn slice32_multi_status_handler_with_succeeded_runs_in_paxr() {
         // A multi-status handler whose list contains `succeeded` fires on
         // paxr's happy path, same as a plain `on succeeded` handler would.
-        let state = run(
-            r#"var trail: string = ""
+        let state = run(r#"var trail: string = ""
 scope work {
   trail &= "w"
 }
 on succeeded or failed work {
   trail &= "-ok"
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(
             state.vars.get("trail"),
@@ -1728,15 +1914,13 @@ on succeeded or failed work {
         // A multi-status handler whose list does NOT contain `succeeded`
         // only fires on real PA failures; paxr skips it like a single
         // `on failed` handler.
-        let state = run(
-            r#"var trail: string = ""
+        let state = run(r#"var trail: string = ""
 scope work {
   trail &= "w"
 }
 on failed or timedout work {
   trail &= "-boom"
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(
             state.vars.get("trail"),
@@ -1748,15 +1932,13 @@ on failed or timedout work {
     fn slice30_on_failed_handler_skipped_in_paxr() {
         // paxr can't simulate failure; `on failed` handlers are announced
         // and skipped so the state dump matches the happy path.
-        let state = run(
-            r#"var trail: string = ""
+        let state = run(r#"var trail: string = ""
 scope work {
   trail &= "w"
 }
 on failed work {
   trail &= "-fail"
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(
             state.vars.get("trail"),
@@ -1768,24 +1950,20 @@ on failed work {
     fn slice29_until_runs_body_at_least_once() {
         // Condition already true on entry -- body still runs once, then
         // the loop exits.
-        let state = run(
-            r#"var n: int = 10
+        let state = run(r#"var n: int = 10
 until n > 5 {
   n += 1
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(state.vars.get("n"), Some(Value::Int(11))));
     }
 
     #[test]
     fn slice29_until_exits_when_condition_becomes_true() {
-        let state = run(
-            r#"var n: int = 0
+        let state = run(r#"var n: int = 0
 until n >= 3 {
   n += 1
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(state.vars.get("n"), Some(Value::Int(3))));
     }
@@ -1794,12 +1972,10 @@ until n >= 3 {
     fn slice29_until_iteration_cap_stops_runaway() {
         // Exit condition never becomes true; loop must stop at the cap and
         // not error. After 60 iterations, n has been incremented 60 times.
-        let state = run(
-            r#"var n: int = 0
+        let state = run(r#"var n: int = 0
 until false {
   n += 1
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(
             state.vars.get("n"),
@@ -1812,12 +1988,10 @@ until false {
         // A user-set `max 3` caps paxr's local simulation at 3 iterations,
         // overriding the default of 60. n increments 3 times and the loop
         // surfaces the iteration-cap notice.
-        let state = run(
-            r#"var n: int = 0
+        let state = run(r#"var n: int = 0
 until false max 3 {
   n += 1
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(
             matches!(state.vars.get("n"), Some(Value::Int(3))),
@@ -1830,12 +2004,10 @@ until false max 3 {
         // paxr cannot simulate wall-clock time, so a user `timeout "..."`
         // is ignored locally. The default iteration cap still applies when
         // `max` isn't set -- here n goes up to 60.
-        let state = run(
-            r#"var n: int = 0
+        let state = run(r#"var n: int = 0
 until false timeout "PT1M" {
   n += 1
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(
             state.vars.get("n"),
@@ -1845,40 +2017,34 @@ until false timeout "PT1M" {
 
     #[test]
     fn slice29_terminate_in_until_body_halts_loop() {
-        let state = run(
-            r#"var n: int = 0
+        let state = run(r#"var n: int = 0
 until n >= 100 {
   n += 1
   if n == 4 { terminate failed "stop" }
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(state.vars.get("n"), Some(Value::Int(4))));
     }
 
     #[test]
     fn slice28_scope_body_executes_in_order() {
-        let state = run(
-            r#"var n: int = 0
+        let state = run(r#"var n: int = 0
 scope {
   n = 1
   n += 4
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(state.vars.get("n"), Some(Value::Int(5))));
     }
 
     #[test]
     fn slice28_nested_scope_works() {
-        let state = run(
-            r#"var n: int = 0
+        let state = run(r#"var n: int = 0
 scope outer {
   scope inner {
     n = 42
   }
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(state.vars.get("n"), Some(Value::Int(42))));
     }
@@ -1887,13 +2053,11 @@ scope outer {
     fn slice28_scope_let_scopes_to_body() {
         // A `let` inside a scope should not appear in the end-of-run dump
         // alongside top-level bindings.
-        let state = run(
-            r#"var x: int = 1
+        let state = run(r#"var x: int = 1
 scope {
   let inner = x + 10
 }
-let outer = x"#,
-        )
+let outer = x"#)
         .unwrap();
         let dump = format_state_dump(&state);
         assert!(!dump.contains("inner"), "scope let leaked:\n{dump}");
@@ -1902,8 +2066,7 @@ let outer = x"#,
 
     #[test]
     fn slice27_switch_runs_matching_case() {
-        let state = run(
-            r#"var status: string = "active"
+        let state = run(r#"var status: string = "active"
 var tag: string = ""
 switch status {
   case "active" {
@@ -1915,8 +2078,7 @@ switch status {
   default {
     tag = "OTHER"
   }
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(
             state.vars.get("tag"),
@@ -1926,8 +2088,7 @@ switch status {
 
     #[test]
     fn slice27_switch_falls_through_to_default() {
-        let state = run(
-            r#"var status: string = "archived"
+        let state = run(r#"var status: string = "archived"
 var tag: string = ""
 switch status {
   case "active" {
@@ -1936,8 +2097,7 @@ switch status {
   default {
     tag = "D"
   }
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(
             state.vars.get("tag"),
@@ -1947,15 +2107,13 @@ switch status {
 
     #[test]
     fn slice27_switch_no_match_no_default_is_noop() {
-        let state = run(
-            r#"var n: int = 99
+        let state = run(r#"var n: int = 99
 var tag: string = "untouched"
 switch n {
   case 1 {
     tag = "changed"
   }
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(
             state.vars.get("tag"),
@@ -1965,15 +2123,13 @@ switch n {
 
     #[test]
     fn slice27_switch_int_cases_match_by_value() {
-        let state = run(
-            r#"var code: int = 2
+        let state = run(r#"var code: int = 2
 var tag: string = ""
 switch code {
   case 1 { tag = "one" }
   case 2 { tag = "two" }
   case 3 { tag = "three" }
-}"#,
-        )
+}"#)
         .unwrap();
         assert!(matches!(
             state.vars.get("tag"),
@@ -1992,7 +2148,7 @@ switch code {
         assert!(matches!(
             eval_let(
                 r#"let enc = uriComponent("a b&c=d")
-let dec = uriComponentToString(enc)"#,
+        let dec = uriComponentToString(enc)"#,
                 "dec"
             ),
             Value::Str(s) if s == "a b&c=d"
@@ -2042,5 +2198,380 @@ let dec = uriComponentToString(enc)"#,
             })
             .unwrap_err();
         assert_eq!(err.span, Some(span));
+    }
+
+    /// Behavior pinning for the paxr function library, pre-registry-refactor.
+    /// These tests lock the exact set of evaluated function names and the
+    /// quirks documented in REFERENCE.md. The next slice moves the dispatch
+    /// from `eval_call`'s match arms into a `FunctionDef` table; these
+    /// pinning tests must continue to pass unchanged across that refactor,
+    /// proving behavior preservation.
+    mod function_pinning {
+        use super::*;
+
+        /// Registry surface lock: the exact set of function names paxr
+        /// evaluates today. After the registry refactor, this expected list
+        /// stays the same and `evaluated_function_names()` derives from the
+        /// FunctionDef table; equality must continue to hold.
+        #[test]
+        fn evaluated_function_names_returns_exact_expected_set() {
+            let expected: &[&str] = &[
+                "add",
+                "sub",
+                "mul",
+                "div",
+                "mod",
+                "min",
+                "max",
+                "range",
+                "coalesce",
+                "equals",
+                "less",
+                "lessOrEquals",
+                "greater",
+                "greaterOrEquals",
+                "not",
+                "and",
+                "or",
+                "concat",
+                "toUpper",
+                "toLower",
+                "trim",
+                "substring",
+                "indexOf",
+                "lastIndexOf",
+                "startsWith",
+                "endsWith",
+                "replace",
+                "split",
+                "join",
+                "uriComponent",
+                "uriComponentToString",
+                "string",
+                "int",
+                "bool",
+                "guid",
+                "createArray",
+                "length",
+                "empty",
+                "contains",
+                "first",
+                "last",
+                "skip",
+                "take",
+            ];
+            let actual = evaluated_function_names();
+            let actual_set: std::collections::BTreeSet<&str> = actual.iter().copied().collect();
+            let expected_set: std::collections::BTreeSet<&str> = expected.iter().copied().collect();
+            assert_eq!(
+                actual_set, expected_set,
+                "evaluated_function_names() drifted from expected list"
+            );
+            assert_eq!(actual.len(), expected.len(), "duplicate names in registry");
+        }
+
+        /// Dispatch sweep: every name in the registry is actually recognized
+        /// by `eval_call`. Catches the failure mode where a name is in the
+        /// registry table but the dispatch is broken or missing (the unknown
+        /// branch fires).
+        #[test]
+        fn every_evaluated_function_dispatches() {
+            // Per-function minimum-passing arguments. Each entry must satisfy
+            // the function's arity guard so the dispatch hits its match arm
+            // rather than falling through to the unknown branch.
+            let cases: &[(&str, Vec<Value>)] = &[
+                ("add", vec![Value::Int(1), Value::Int(2)]),
+                ("sub", vec![Value::Int(2), Value::Int(1)]),
+                ("mul", vec![Value::Int(2), Value::Int(3)]),
+                ("div", vec![Value::Int(6), Value::Int(2)]),
+                ("mod", vec![Value::Int(7), Value::Int(3)]),
+                ("min", vec![Value::Int(1)]),
+                ("max", vec![Value::Int(1)]),
+                ("range", vec![Value::Int(0), Value::Int(3)]),
+                ("coalesce", vec![Value::Null, Value::Int(1)]),
+                ("equals", vec![Value::Int(1), Value::Int(1)]),
+                ("less", vec![Value::Int(1), Value::Int(2)]),
+                ("lessOrEquals", vec![Value::Int(1), Value::Int(2)]),
+                ("greater", vec![Value::Int(2), Value::Int(1)]),
+                ("greaterOrEquals", vec![Value::Int(2), Value::Int(1)]),
+                ("not", vec![Value::Bool(true)]),
+                ("and", vec![Value::Bool(true), Value::Bool(true)]),
+                ("or", vec![Value::Bool(false), Value::Bool(true)]),
+                (
+                    "concat",
+                    vec![Value::Str("a".to_string()), Value::Str("b".to_string())],
+                ),
+                ("toUpper", vec![Value::Str("hi".to_string())]),
+                ("toLower", vec![Value::Str("HI".to_string())]),
+                ("trim", vec![Value::Str(" hi ".to_string())]),
+                (
+                    "substring",
+                    vec![
+                        Value::Str("hello".to_string()),
+                        Value::Int(0),
+                        Value::Int(2),
+                    ],
+                ),
+                (
+                    "indexOf",
+                    vec![Value::Str("hello".to_string()), Value::Str("l".to_string())],
+                ),
+                (
+                    "lastIndexOf",
+                    vec![Value::Str("hello".to_string()), Value::Str("l".to_string())],
+                ),
+                (
+                    "startsWith",
+                    vec![
+                        Value::Str("hello".to_string()),
+                        Value::Str("he".to_string()),
+                    ],
+                ),
+                (
+                    "endsWith",
+                    vec![
+                        Value::Str("hello".to_string()),
+                        Value::Str("lo".to_string()),
+                    ],
+                ),
+                (
+                    "replace",
+                    vec![
+                        Value::Str("a-b".to_string()),
+                        Value::Str("-".to_string()),
+                        Value::Str("_".to_string()),
+                    ],
+                ),
+                (
+                    "split",
+                    vec![Value::Str("a,b".to_string()), Value::Str(",".to_string())],
+                ),
+                (
+                    "join",
+                    vec![
+                        Value::Array(vec![Value::Str("a".to_string())]),
+                        Value::Str(",".to_string()),
+                    ],
+                ),
+                ("uriComponent", vec![Value::Str("a b".to_string())]),
+                (
+                    "uriComponentToString",
+                    vec![Value::Str("a%20b".to_string())],
+                ),
+                ("string", vec![Value::Int(1)]),
+                ("int", vec![Value::Str("1".to_string())]),
+                ("bool", vec![Value::Str("true".to_string())]),
+                ("guid", vec![]),
+                ("createArray", vec![Value::Int(1)]),
+                ("length", vec![Value::Str("hi".to_string())]),
+                ("empty", vec![Value::Str("".to_string())]),
+                (
+                    "contains",
+                    vec![
+                        Value::Str("hello".to_string()),
+                        Value::Str("ll".to_string()),
+                    ],
+                ),
+                ("first", vec![Value::Array(vec![Value::Int(1)])]),
+                ("last", vec![Value::Array(vec![Value::Int(1)])]),
+                (
+                    "skip",
+                    vec![
+                        Value::Array(vec![Value::Int(1), Value::Int(2)]),
+                        Value::Int(1),
+                    ],
+                ),
+                (
+                    "take",
+                    vec![
+                        Value::Array(vec![Value::Int(1), Value::Int(2)]),
+                        Value::Int(1),
+                    ],
+                ),
+            ];
+            // Cases must cover the full registry (and only the registry).
+            let case_names: std::collections::BTreeSet<&str> =
+                cases.iter().map(|(n, _)| *n).collect();
+            let registry: std::collections::BTreeSet<&str> =
+                evaluated_function_names().iter().copied().collect();
+            assert_eq!(
+                case_names, registry,
+                "dispatch sweep cases drifted from registry"
+            );
+
+            for (name, args) in cases {
+                let (_, unknown) = eval_call(name, args.clone());
+                assert!(
+                    !unknown,
+                    "function `{name}` should dispatch but hit the unknown branch"
+                );
+            }
+        }
+
+        // --- Boundary pins for the implicit-only comparison operators. ---
+
+        #[test]
+        fn fn_less_or_equals_boundary() {
+            assert!(matches!(
+                eval_let("let x = lessOrEquals(3, 3)", "x"),
+                Value::Bool(true)
+            ));
+            assert!(matches!(
+                eval_let("let x = lessOrEquals(3, 4)", "x"),
+                Value::Bool(true)
+            ));
+            assert!(matches!(
+                eval_let("let x = lessOrEquals(4, 3)", "x"),
+                Value::Bool(false)
+            ));
+        }
+
+        #[test]
+        fn fn_greater_or_equals_boundary() {
+            assert!(matches!(
+                eval_let("let x = greaterOrEquals(3, 3)", "x"),
+                Value::Bool(true)
+            ));
+            assert!(matches!(
+                eval_let("let x = greaterOrEquals(4, 3)", "x"),
+                Value::Bool(true)
+            ));
+            assert!(matches!(
+                eval_let("let x = greaterOrEquals(3, 4)", "x"),
+                Value::Bool(false)
+            ));
+        }
+
+        // --- Quirk pins not currently covered by named tests. ---
+
+        /// String indexing is character-based, not byte-based. UTF-8
+        /// multi-byte characters count as one each. Documented in
+        /// REFERENCE.md; was previously untested.
+        #[test]
+        fn fn_string_indexing_is_character_based_utf8() {
+            // "café" is 4 chars / 5 bytes (é is 2 bytes in UTF-8).
+            assert!(matches!(
+                eval_let(r#"let x = length("café")"#, "x"),
+                Value::Int(4)
+            ));
+            assert!(matches!(
+                eval_let(r#"let x = substring("café", 0, 4)"#, "x"),
+                Value::Str(s) if s == "café"
+            ));
+            assert!(matches!(
+                eval_let(r#"let x = indexOf("café", "é")"#, "x"),
+                Value::Int(3)
+            ));
+        }
+
+        /// Empty string is a valid value, distinct from null. `coalesce`
+        /// only skips nulls, not empties.
+        #[test]
+        fn fn_coalesce_empty_string_is_not_null() {
+            assert!(matches!(
+                eval_let(r#"let x = coalesce("", "fallback")"#, "x"),
+                Value::Str(s) if s.is_empty()
+            ));
+        }
+
+        /// `bool` parses with whitespace trimming (matches `int`'s behavior).
+        #[test]
+        fn fn_bool_trims_whitespace() {
+            assert!(matches!(
+                eval_let(r#"let x = bool("  true  ")"#, "x"),
+                Value::Bool(true)
+            ));
+            assert!(matches!(
+                eval_let(r#"let x = bool("  FALSE  ")"#, "x"),
+                Value::Bool(false)
+            ));
+        }
+
+        /// `concat` is fully variadic: zero args → empty string, one arg →
+        /// itself, many args → concatenation.
+        #[test]
+        fn fn_concat_variadic_edges() {
+            assert!(matches!(eval_let("let x = concat()", "x"), Value::Str(s) if s.is_empty()));
+            assert!(matches!(eval_let(r#"let x = concat("a")"#, "x"), Value::Str(s) if s == "a"));
+            assert!(matches!(
+                eval_let(r#"let x = concat("a", "b", "c")"#, "x"),
+                Value::Str(s) if s == "abc"
+            ));
+        }
+
+        /// `and` and `or` are variadic, matching PA's semantics. Zero args
+        /// returns null (no identity baked in); one arg returns the arg
+        /// as-is; two-or-more folds left.
+        #[test]
+        fn fn_and_or_variadic() {
+            // Two-arg base case.
+            assert!(matches!(
+                eval_let("let x = and(true, true)", "x"),
+                Value::Bool(true)
+            ));
+            assert!(matches!(
+                eval_let("let x = and(true, false)", "x"),
+                Value::Bool(false)
+            ));
+            assert!(matches!(
+                eval_let("let x = or(false, true)", "x"),
+                Value::Bool(true)
+            ));
+            assert!(matches!(
+                eval_let("let x = or(false, false)", "x"),
+                Value::Bool(false)
+            ));
+            // Three-arg fold.
+            assert!(matches!(
+                eval_let("let x = and(true, true, true)", "x"),
+                Value::Bool(true)
+            ));
+            assert!(matches!(
+                eval_let("let x = and(true, false, true)", "x"),
+                Value::Bool(false)
+            ));
+            assert!(matches!(
+                eval_let("let x = or(false, false, true)", "x"),
+                Value::Bool(true)
+            ));
+            assert!(matches!(
+                eval_let("let x = or(false, false, false)", "x"),
+                Value::Bool(false)
+            ));
+            // One-arg form returns the argument as-is.
+            assert!(matches!(
+                eval_let("let x = and(true)", "x"),
+                Value::Bool(true)
+            ));
+            assert!(matches!(
+                eval_let("let x = or(false)", "x"),
+                Value::Bool(false)
+            ));
+            // Zero-arg form returns null (PA has no identity element here).
+            let (v, unknown) = eval_call("and", vec![]);
+            assert!(matches!(v, Value::Null));
+            assert!(!unknown, "and() should dispatch even with zero args");
+            let (v, unknown) = eval_call("or", vec![]);
+            assert!(matches!(v, Value::Null));
+            assert!(!unknown);
+        }
+
+        /// `not` is strictly unary. Wrong arity returns Null (does not panic
+        /// or error), matching paxr's permissive function-call model.
+        #[test]
+        fn fn_not_arity_guard() {
+            assert!(matches!(
+                eval_let("let x = not(true)", "x"),
+                Value::Bool(false)
+            ));
+            assert!(matches!(
+                eval_let("let x = not(false)", "x"),
+                Value::Bool(true)
+            ));
+            // Two-arg form falls through the guard; eval_call returns Null.
+            let (v, unknown) = eval_call("not", vec![Value::Bool(true), Value::Bool(false)]);
+            assert!(matches!(v, Value::Null));
+            assert!(unknown, "two-arg not() should fall to the unknown branch");
+        }
     }
 }

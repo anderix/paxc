@@ -12,8 +12,7 @@ use crate::resolver::{
 };
 use serde_json::{Map, Value, json};
 
-const SCHEMA_URL: &str =
-    "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#";
+const SCHEMA_URL: &str = "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#";
 
 pub fn emit(program: &ResolvedProgram) -> Value {
     json!({
@@ -221,10 +220,7 @@ fn emit_switch(
     // the source's intent is preserved.
     let mut out = Map::new();
     out.insert("type".to_string(), json!(action::SWITCH));
-    out.insert(
-        "expression".to_string(),
-        json!(expr_to_pa_field(subject)),
-    );
+    out.insert("expression".to_string(), json!(expr_to_pa_field(subject)));
     out.insert("cases".to_string(), Value::Object(cases_map));
     if let Some(default_actions) = default {
         out.insert(
@@ -245,7 +241,10 @@ fn emit_terminate(status: TerminateStatus, message: Option<&Expr>) -> Value {
         // `expr_to_json` emits literal strings as plain JSON and expressions
         // as the `@{...}` interpolation form -- both valid for PA's
         // `runError.message` field.
-        inputs.insert("runError".to_string(), json!({ "message": expr_to_json(msg) }));
+        inputs.insert(
+            "runError".to_string(),
+            json!({ "message": expr_to_json(msg) }),
+        );
     }
     json!({
         "type": action::TERMINATE,
@@ -287,7 +286,9 @@ fn emit_condition(
 fn is_boolean_expr(expr: &Expr) -> bool {
     match expr {
         Expr::BinaryOp { op, .. } => op.is_boolean(),
-        Expr::UnaryOp { op: UnaryOp::Not, .. } => true,
+        Expr::UnaryOp {
+            op: UnaryOp::Not, ..
+        } => true,
         _ => false,
     }
 }
@@ -464,7 +465,10 @@ mod tests {
 
     fn compile(src: &str) -> Value {
         let src = format!("trigger manual\n{src}");
-        let tokens = lexer().parse(src.as_str()).into_result().expect("lex failed");
+        let tokens = lexer()
+            .parse(src.as_str())
+            .into_result()
+            .expect("lex failed");
         let program = parser()
             .parse(
                 tokens
@@ -583,10 +587,7 @@ var msg: string = "count: " & total + 1"#,
     fn slice16_not_equals_synthesized_via_not() {
         let out = compile("var a: int = 5\nlet check = a != 10");
         let v = &out["definition"]["actions"]["Compose_check"]["inputs"];
-        assert_eq!(
-            v.as_str().unwrap(),
-            "@{not(equals(variables('a'), 10))}"
-        );
+        assert_eq!(v.as_str().unwrap(), "@{not(equals(variables('a'), 10))}");
     }
 
     #[test]
@@ -615,7 +616,10 @@ if ok {
     fn slice17_logical_and_or_emit_pa_functions() {
         let out = compile("var a: bool = true\nvar b: bool = false\nlet c = a && b");
         let v = &out["definition"]["actions"]["Compose_c"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@{and(variables('a'), variables('b'))}");
+        assert_eq!(
+            v.as_str().unwrap(),
+            "@{and(variables('a'), variables('b'))}"
+        );
 
         let out = compile("var a: bool = true\nvar b: bool = false\nlet c = a || b");
         let v = &out["definition"]["actions"]["Compose_c"]["inputs"];
@@ -760,10 +764,15 @@ if empty(items) {
 
     #[test]
     fn v1_1_concat_with_literal_on_left() {
-        let out = compile(r#"var name: string = "world"
-let greeting = "hello " & name"#);
+        let out = compile(
+            r#"var name: string = "world"
+let greeting = "hello " & name"#,
+        );
         let v = &out["definition"]["actions"]["Compose_greeting"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@{concat('hello ', variables('name'))}");
+        assert_eq!(
+            v.as_str().unwrap(),
+            "@{concat('hello ', variables('name'))}"
+        );
     }
 
     #[test]
@@ -800,8 +809,8 @@ let x = a != b || a == 0"#,
             r#"var greeting: string = "hello"
 var message: string = greeting & ", world""#,
         );
-        let msg_value = &out["definition"]["actions"]["Initialize_message"]["inputs"]
-            ["variables"][0]["value"];
+        let msg_value =
+            &out["definition"]["actions"]["Initialize_message"]["inputs"]["variables"][0]["value"];
         assert_eq!(
             msg_value.as_str().unwrap(),
             "@{concat(variables('greeting'), ', world')}"
@@ -892,19 +901,20 @@ msg &= "!""#,
         let out = compile(r#"terminate failed "validation failed""#);
         let action = &out["definition"]["actions"]["Terminate"];
         assert_eq!(action["inputs"]["runStatus"], "Failed");
-        assert_eq!(
-            action["inputs"]["runError"]["message"],
-            "validation failed"
-        );
+        assert_eq!(action["inputs"]["runError"]["message"], "validation failed");
     }
 
     #[test]
     fn slice22_terminate_failed_with_expression_message() {
         // Message expression should be emitted as a PA expression string.
-        let out = compile("var step: string = \"validate\"\nterminate failed \"failed at \" & step");
+        let out =
+            compile("var step: string = \"validate\"\nterminate failed \"failed at \" & step");
         let action = &out["definition"]["actions"]["Terminate"];
         let msg = action["inputs"]["runError"]["message"].as_str().unwrap();
-        assert!(msg.starts_with("@"), "expected PA expression wrapping, got {msg}");
+        assert!(
+            msg.starts_with("@"),
+            "expected PA expression wrapping, got {msg}"
+        );
         assert!(msg.contains("concat"));
         assert!(msg.contains("failed at"));
     }
@@ -1020,10 +1030,7 @@ on succeeded work {
 }"#,
         );
         let handler = &out["definition"]["actions"]["On_succeeded_work"];
-        assert_eq!(
-            handler["runAfter"],
-            json!({ "Scope_work": ["Succeeded"] })
-        );
+        assert_eq!(handler["runAfter"], json!({ "Scope_work": ["Succeeded"] }));
     }
 
     #[test]
@@ -1158,12 +1165,7 @@ scope {
         assert_eq!(scope["type"], "Scope");
         // Body actions live under the scope, not at workflow top level.
         assert!(!actions.contains_key("Set_x"));
-        assert!(
-            scope["actions"]
-                .as_object()
-                .unwrap()
-                .contains_key("Set_x")
-        );
+        assert!(scope["actions"].as_object().unwrap().contains_key("Set_x"));
     }
 
     #[test]
@@ -1222,10 +1224,7 @@ switch status {
         );
         let sw = &out["definition"]["actions"]["Switch"];
         assert_eq!(sw["type"], "Switch");
-        assert_eq!(
-            sw["expression"].as_str().unwrap(),
-            "@variables('status')"
-        );
+        assert_eq!(sw["expression"].as_str().unwrap(), "@variables('status')");
         let cases = sw["cases"].as_object().unwrap();
         assert!(cases.contains_key("Case"), "first case uses bare Case key");
         assert!(cases.contains_key("Case_1"), "second case uses Case_1");
@@ -1290,7 +1289,10 @@ switch n {
         assert!(actions.contains_key("Initialize_n"));
         assert!(actions.contains_key("Initialize_tag"));
         assert!(actions.contains_key("Switch"));
-        assert!(!actions.contains_key("Set_tag"), "case body action leaked to top level");
+        assert!(
+            !actions.contains_key("Set_tag"),
+            "case body action leaked to top level"
+        );
         let case1 = &actions["Switch"]["cases"]["Case"]["actions"];
         assert!(case1.as_object().unwrap().contains_key("Set_tag"));
     }

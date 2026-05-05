@@ -90,12 +90,12 @@ where
             .collect::<Vec<Expr>>()
             .delimited_by(just(Token::LParen), just(Token::RParen));
 
-        let path_seed = ident_spanned.then(call_args.or_not()).map(
-            |((name, span), maybe_args)| match maybe_args {
+        let path_seed = ident_spanned
+            .then(call_args.or_not())
+            .map(|((name, span), maybe_args)| match maybe_args {
                 Some(args) => Expr::Call { name, args },
                 None => Expr::Ref { name, span },
-            },
-        );
+            });
 
         let field = just(Token::Dot).ignore_then(ident_s);
 
@@ -246,20 +246,23 @@ where
         }
         .labelled("assignment operator");
 
-        let assign = name_spanned
-            .then(assign_op)
-            .then(expr.clone())
-            .map(|(((name, name_span), op), value)| Stmt::Assign {
+        let assign = name_spanned.then(assign_op).then(expr.clone()).map(
+            |(((name, name_span), op), value)| Stmt::Assign {
                 name,
                 name_span,
                 op,
                 value,
-            });
+            },
+        );
 
         let raw_stmt = just(Token::Raw)
             .ignore_then(select! { Token::Ident(s) => s.to_string() })
             .then(object_entries.clone())
-            .map_with(|(name, body), e| Stmt::Raw { name, body, span: e.span() });
+            .map_with(|(name, body), e| Stmt::Raw {
+                name,
+                body,
+                span: e.span(),
+            });
 
         let let_decl = just(Token::Let)
             .ignore_then(name_spanned)
@@ -272,27 +275,23 @@ where
             });
 
         let if_stmt = recursive(|if_stmt| {
-            let spanned_condition = expr
-                .clone()
-                .map_with(|cond, e| (cond, e.span()));
+            let spanned_condition = expr.clone().map_with(|cond, e| (cond, e.span()));
             just(Token::If)
                 .ignore_then(spanned_condition)
                 .then(block.clone())
                 .then(
                     just(Token::Else)
-                        .ignore_then(
-                            if_stmt
-                                .map(|s| vec![s])
-                                .or(block.clone()),
-                        )
+                        .ignore_then(if_stmt.map(|s| vec![s]).or(block.clone()))
                         .or_not(),
                 )
-                .map(|(((condition, condition_span), true_branch), else_branch)| Stmt::If {
-                    condition,
-                    condition_span,
-                    true_branch,
-                    false_branch: else_branch.unwrap_or_default(),
-                })
+                .map(
+                    |(((condition, condition_span), true_branch), else_branch)| Stmt::If {
+                        condition,
+                        condition_span,
+                        true_branch,
+                        false_branch: else_branch.unwrap_or_default(),
+                    },
+                )
         });
 
         // `until <condition> [max N] [timeout "PT30M"] { body }` -- PA's
@@ -314,27 +313,23 @@ where
             .then(until_max.or_not())
             .then(until_timeout.or_not())
             .then(block.clone())
-            .map_with(|(
-                ((
-                    (condition, condition_span),
-                    max_clause,
-                ), timeout_clause),
-                body,
-            ), e| {
-                let (limit_count, limit_count_span) = match max_clause {
-                    Some((n, sp)) => (Some(n), Some(sp)),
-                    None => (None, None),
-                };
-                Stmt::Until {
-                    condition,
-                    condition_span,
-                    limit_count,
-                    limit_count_span,
-                    limit_timeout: timeout_clause,
-                    body,
-                    span: e.span(),
-                }
-            });
+            .map_with(
+                |((((condition, condition_span), max_clause), timeout_clause), body), e| {
+                    let (limit_count, limit_count_span) = match max_clause {
+                        Some((n, sp)) => (Some(n), Some(sp)),
+                        None => (None, None),
+                    };
+                    Stmt::Until {
+                        condition,
+                        condition_span,
+                        limit_count,
+                        limit_count_span,
+                        limit_timeout: timeout_clause,
+                        body,
+                        span: e.span(),
+                    }
+                },
+            );
 
         let foreach_stmt = just(Token::Foreach)
             .ignore_then(name)
@@ -350,9 +345,10 @@ where
 
         // `debug(args)` -- each arg keeps its source span so paxr can
         // auto-label with the exact source slice the user wrote.
-        let debug_arg = expr
-            .clone()
-            .map_with(|expr, e| DebugArg { expr, span: e.span() });
+        let debug_arg = expr.clone().map_with(|expr, e| DebugArg {
+            expr,
+            span: e.span(),
+        });
 
         let debug_stmt = just(Token::Debug)
             .ignore_then(
@@ -362,7 +358,10 @@ where
                     .collect::<Vec<_>>()
                     .delimited_by(just(Token::LParen), just(Token::RParen)),
             )
-            .map_with(|args, e| Stmt::Debug { args, span: e.span() });
+            .map_with(|args, e| Stmt::Debug {
+                args,
+                span: e.span(),
+            });
 
         // `terminate <status> [message]`. Status is one of succeeded / failed /
         // cancelled. Only `failed` accepts a trailing message expression; the
@@ -372,22 +371,23 @@ where
         let failed_form = select! { Token::Ident("failed") => () }
             .ignore_then(expr.clone().or_not())
             .map(|msg| (TerminateStatus::Failed, msg));
-        let succeeded_form = select! { Token::Ident("succeeded") => () }
-            .map(|_| (TerminateStatus::Succeeded, None));
-        let cancelled_form = select! { Token::Ident("cancelled") => () }
-            .map(|_| (TerminateStatus::Cancelled, None));
+        let succeeded_form =
+            select! { Token::Ident("succeeded") => () }.map(|_| (TerminateStatus::Succeeded, None));
+        let cancelled_form =
+            select! { Token::Ident("cancelled") => () }.map(|_| (TerminateStatus::Cancelled, None));
         let terminate_body = failed_form
             .or(succeeded_form)
             .or(cancelled_form)
             .labelled("terminate status (succeeded, failed, or cancelled)");
 
-        let terminate_stmt = just(Token::Terminate)
-            .ignore_then(terminate_body)
-            .map_with(|(status, message), e| Stmt::Terminate {
-                status,
-                message,
-                span: e.span(),
-            });
+        let terminate_stmt =
+            just(Token::Terminate)
+                .ignore_then(terminate_body)
+                .map_with(|(status, message), e| Stmt::Terminate {
+                    status,
+                    message,
+                    span: e.span(),
+                });
 
         // Case values are restricted to scalar literals (string / int / bool),
         // matching PA's constraint. Arbitrary expressions are not allowed.
@@ -446,13 +446,15 @@ where
             .ignore_then(handler_statuses)
             .then(name.map_with(|s, e| (s.to_string(), e.span())))
             .then(block.clone())
-            .map_with(|((statuses, (target, target_span)), body), e| Stmt::OnHandler {
-                statuses,
-                target,
-                target_span,
-                body,
-                span: e.span(),
-            });
+            .map_with(
+                |((statuses, (target, target_span)), body), e| Stmt::OnHandler {
+                    statuses,
+                    target,
+                    target_span,
+                    body,
+                    span: e.span(),
+                },
+            );
 
         // `scope [name] { ... }`. The optional name becomes part of the action
         // key. Without one, the resolver auto-suffixes `Scope`, `Scope_1`, ...
@@ -466,17 +468,17 @@ where
             });
 
         let switch_stmt = just(Token::Switch)
-            .ignore_then(
-                expr.clone().map_with(|cond, e| (cond, e.span())),
-            )
+            .ignore_then(expr.clone().map_with(|cond, e| (cond, e.span())))
             .then(switch_body)
-            .map_with(|((subject, subject_span), (cases, default)), e| Stmt::Switch {
-                subject,
-                subject_span,
-                cases,
-                default,
-                span: e.span(),
-            });
+            .map_with(
+                |((subject, subject_span), (cases, default)), e| Stmt::Switch {
+                    subject,
+                    subject_span,
+                    cases,
+                    default,
+                    span: e.span(),
+                },
+            );
 
         var_decl
             .or(let_decl)
@@ -549,7 +551,10 @@ mod tests {
         // Prepend a manual trigger so slice-specific tests can focus on their
         // new syntax without every test having to repeat the trigger line.
         let src = format!("trigger manual\n{src}");
-        let tokens = lexer().parse(src.as_str()).into_result().expect("lex failed");
+        let tokens = lexer()
+            .parse(src.as_str())
+            .into_result()
+            .expect("lex failed");
         parser()
             .parse(
                 tokens
@@ -565,7 +570,9 @@ mod tests {
         let prog = parse("var counter: int = 1");
         assert_eq!(prog.statements.len(), 1);
         match &prog.statements[0] {
-            Stmt::VarDecl { name, ty, value, .. } => {
+            Stmt::VarDecl {
+                name, ty, value, ..
+            } => {
                 assert_eq!(name, "counter");
                 assert!(matches!(ty, Type::Int));
                 assert!(matches!(value, Expr::Literal(Literal::Int(1))));
@@ -609,10 +616,7 @@ mod tests {
                 .as_slice()
                 .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
         );
-        assert!(
-            result.has_errors(),
-            "chained comparisons should not parse"
-        );
+        assert!(result.has_errors(), "chained comparisons should not parse");
     }
 
     #[test]
@@ -660,7 +664,8 @@ mod tests {
     fn slice20_debug_arg_span_covers_source_slice() {
         // Per-arg spans let paxr show `total - completed=<value>` rather
         // than just the evaluated number.
-        let src = "trigger manual\nvar total: int = 0\nvar completed: int = 0\ndebug(total - completed)";
+        let src =
+            "trigger manual\nvar total: int = 0\nvar completed: int = 0\ndebug(total - completed)";
         let tokens = lexer().parse(src).into_result().expect("lex failed");
         let prog = parser()
             .parse(
@@ -686,7 +691,9 @@ mod tests {
         let prog = parse("var x: int = 1\nx += 2");
         assert_eq!(prog.statements.len(), 2);
         match &prog.statements[1] {
-            Stmt::Assign { name, op, value, .. } => {
+            Stmt::Assign {
+                name, op, value, ..
+            } => {
                 assert_eq!(name, "x");
                 assert!(matches!(op, AssignOp::Add));
                 assert!(matches!(value, Expr::Literal(Literal::Int(2))));
@@ -872,9 +879,7 @@ mod tests {
 
     #[test]
     fn slice34_until_timeout_clause_parses() {
-        let prog = parse(
-            "var n: int = 0\nuntil n > 5 timeout \"PT30M\" { n += 1 }",
-        );
+        let prog = parse("var n: int = 0\nuntil n > 5 timeout \"PT30M\" { n += 1 }");
         match &prog.statements[1] {
             Stmt::Until {
                 limit_count,
@@ -890,9 +895,7 @@ mod tests {
 
     #[test]
     fn slice34_until_max_and_timeout_both_parse() {
-        let prog = parse(
-            "var n: int = 0\nuntil n > 5 max 10 timeout \"PT30M\" { n += 1 }",
-        );
+        let prog = parse("var n: int = 0\nuntil n > 5 max 10 timeout \"PT30M\" { n += 1 }");
         match &prog.statements[1] {
             Stmt::Until {
                 limit_count,
@@ -949,7 +952,12 @@ on failed try_work {
 }"#,
         );
         match &prog.statements[1] {
-            Stmt::OnHandler { statuses, target, body, .. } => {
+            Stmt::OnHandler {
+                statuses,
+                target,
+                body,
+                ..
+            } => {
                 assert_eq!(statuses, &vec![HandlerStatus::Failed]);
                 assert_eq!(target, "try_work");
                 assert!(body.is_empty());
@@ -998,7 +1006,9 @@ on failed or timedout try_work {
 }"#,
         );
         match &prog.statements[1] {
-            Stmt::OnHandler { statuses, target, .. } => {
+            Stmt::OnHandler {
+                statuses, target, ..
+            } => {
                 assert_eq!(
                     statuses,
                     &vec![HandlerStatus::Failed, HandlerStatus::TimedOut],
