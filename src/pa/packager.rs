@@ -153,7 +153,7 @@ fn transform_for_pa(compiled: &Value) -> Value {
         if let Some(v) = old.get("actions") {
             let mut actions = v.clone();
             lowercase_var_types(&mut actions);
-            strip_connector_authentication(&mut actions);
+            fix_connector_inputs(&mut actions);
             out.insert("actions".to_string(), actions);
         }
     }
@@ -232,13 +232,20 @@ fn lowercase_var_types(actions: &mut Value) {
     }
 }
 
-/// PA's exporter writes `inputs.authentication: "@parameters('$authentication')"`
-/// on connector actions, but its importer rejects the same field with
-/// `WorkflowRunActionInputsInvalidProperty`. The authentication is auto-injected
-/// at runtime from `connectionReferences`, so the field is redundant on import.
-/// Strip it from `OpenApiConnection` / `OpenApiConnectionWebhook` actions and
-/// recurse through container bodies to catch nested connectors.
-fn strip_connector_authentication(actions: &mut Value) {
+/// Per-connector-action import fixups. PA's exporter and importer disagree
+/// on connector input shapes in two ways that consistently appear together:
+///
+/// 1. `inputs.authentication: "@parameters('$authentication')"` is exported
+///    but rejected on import (`WorkflowRunActionInputsInvalidProperty`).
+///    Auto-injected from `connectionReferences` at runtime, so redundant.
+/// 2. `inputs.host.connectionName` is the export label; the importer wants
+///    `inputs.host.connectionReferenceName` (same VALUE — the connection
+///    reference key — under a different field name). Without the rename
+///    the importer fails with `WorkflowRunActionInputsMissingProperty`.
+///
+/// Applies to `OpenApiConnection` / `OpenApiConnectionWebhook` and recurses
+/// through container bodies to catch nested connectors.
+fn fix_connector_inputs(actions: &mut Value) {
     let Some(obj) = actions.as_object_mut() else {
         return;
     };
@@ -255,31 +262,36 @@ fn strip_connector_authentication(actions: &mut Value) {
             "OpenApiConnection" | "OpenApiConnectionWebhook" => {
                 if let Some(inputs) = a.get_mut("inputs").and_then(|v| v.as_object_mut()) {
                     inputs.remove("authentication");
+                    if let Some(host) = inputs.get_mut("host").and_then(|v| v.as_object_mut())
+                        && let Some(conn) = host.remove("connectionName")
+                    {
+                        host.insert("connectionReferenceName".to_string(), conn);
+                    }
                 }
             }
             "Foreach" | "Scope" | "Until" => {
                 if let Some(nested) = a.get_mut("actions") {
-                    strip_connector_authentication(nested);
+                    fix_connector_inputs(nested);
                 }
             }
             "If" => {
                 if let Some(nested) = a.get_mut("actions") {
-                    strip_connector_authentication(nested);
+                    fix_connector_inputs(nested);
                 }
                 if let Some(else_obj) = a.get_mut("else").and_then(|e| e.get_mut("actions")) {
-                    strip_connector_authentication(else_obj);
+                    fix_connector_inputs(else_obj);
                 }
             }
             "Switch" => {
                 if let Some(cases) = a.get_mut("cases").and_then(|v| v.as_object_mut()) {
                     for (_, case) in cases.iter_mut() {
                         if let Some(nested) = case.get_mut("actions") {
-                            strip_connector_authentication(nested);
+                            fix_connector_inputs(nested);
                         }
                     }
                 }
                 if let Some(default) = a.get_mut("default").and_then(|d| d.get_mut("actions")) {
-                    strip_connector_authentication(default);
+                    fix_connector_inputs(default);
                 }
             }
             _ => {}
@@ -363,7 +375,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strip_connector_authentication_removes_field_at_top_level() {
+    fn fix_connector_inputs_removes_authentication_field() {
         let mut actions = json!({
             "Get_items": {
                 "type": "OpenApiConnection",
@@ -374,7 +386,7 @@ mod tests {
                 }
             }
         });
-        strip_connector_authentication(&mut actions);
+        fix_connector_inputs(&mut actions);
         let inputs = &actions["Get_items"]["inputs"];
         assert!(inputs.get("authentication").is_none());
         assert!(inputs.get("parameters").is_some());
@@ -382,7 +394,37 @@ mod tests {
     }
 
     #[test]
-    fn strip_connector_authentication_recurses_through_containers() {
+    fn fix_connector_inputs_renames_host_connection_name() {
+        // PA exports `host.connectionName`; importer expects
+        // `host.connectionReferenceName`. Same value, different field label.
+        let mut actions = json!({
+            "Get_items": {
+                "type": "OpenApiConnection",
+                "inputs": {
+                    "host": {
+                        "apiId": "x",
+                        "connectionName": "shared_sharepointonline",
+                        "operationId": "GetItems"
+                    }
+                }
+            }
+        });
+        fix_connector_inputs(&mut actions);
+        let host = &actions["Get_items"]["inputs"]["host"];
+        assert!(host.get("connectionName").is_none());
+        assert_eq!(
+            host.get("connectionReferenceName").and_then(|v| v.as_str()),
+            Some("shared_sharepointonline")
+        );
+        assert_eq!(host.get("apiId").and_then(|v| v.as_str()), Some("x"));
+        assert_eq!(
+            host.get("operationId").and_then(|v| v.as_str()),
+            Some("GetItems")
+        );
+    }
+
+    #[test]
+    fn fix_connector_inputs_recurses_through_containers() {
         let mut actions = json!({
             "Apply_to_each": {
                 "type": "Foreach",
@@ -413,7 +455,7 @@ mod tests {
                 }
             }
         });
-        strip_connector_authentication(&mut actions);
+        fix_connector_inputs(&mut actions);
         let inner =
             &actions["Apply_to_each"]["actions"]["If_check"]["actions"]["Inner_call"]["inputs"];
         let else_call = &actions["Apply_to_each"]["actions"]["If_check"]["else"]["actions"]["Else_call"]
@@ -423,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_connector_authentication_leaves_non_connectors_alone() {
+    fn fix_connector_inputs_leaves_non_connectors_alone() {
         // Variable / Compose actions don't have inputs.authentication, but
         // the pass should be a no-op even on hypothetical other types.
         let mut actions = json!({
@@ -437,7 +479,7 @@ mod tests {
             }
         });
         let snapshot = actions.clone();
-        strip_connector_authentication(&mut actions);
+        fix_connector_inputs(&mut actions);
         assert_eq!(actions, snapshot);
     }
 }
