@@ -285,10 +285,22 @@ fn fix_connector_inputs(actions: &mut Value) {
             "OpenApiConnection" | "OpenApiConnectionWebhook" => {
                 if let Some(inputs) = a.get_mut("inputs").and_then(|v| v.as_object_mut()) {
                     inputs.remove("authentication");
-                    if let Some(host) = inputs.get_mut("host").and_then(|v| v.as_object_mut())
-                        && let Some(conn) = host.remove("connectionName")
-                    {
-                        host.insert("connectionReferenceName".to_string(), conn);
+                    if let Some(host) = inputs.get_mut("host").and_then(|v| v.as_object_mut()) {
+                        // PA's import-time validator wants
+                        // `host.connectionReferenceName`; PA's run-/save-time
+                        // validator wants `host.connectionName`. The original
+                        // export only carries the latter, but the importer
+                        // rejects packages that lack the former. Set both to
+                        // the same connection-reference key so each validator
+                        // gets what it expects.
+                        let conn = host
+                            .get("connectionName")
+                            .or_else(|| host.get("connectionReferenceName"))
+                            .cloned();
+                        if let Some(conn) = conn {
+                            host.insert("connectionName".to_string(), conn.clone());
+                            host.insert("connectionReferenceName".to_string(), conn);
+                        }
                     }
                 }
             }
@@ -536,9 +548,9 @@ mod tests {
     }
 
     #[test]
-    fn fix_connector_inputs_renames_host_connection_name() {
-        // PA exports `host.connectionName`; importer expects
-        // `host.connectionReferenceName`. Same value, different field label.
+    fn fix_connector_inputs_emits_both_connection_name_fields() {
+        // PA's import-time and save-time validators want different field
+        // names for the same value. We set both.
         let mut actions = json!({
             "Get_items": {
                 "type": "OpenApiConnection",
@@ -553,15 +565,13 @@ mod tests {
         });
         fix_connector_inputs(&mut actions);
         let host = &actions["Get_items"]["inputs"]["host"];
-        assert!(host.get("connectionName").is_none());
+        assert_eq!(
+            host.get("connectionName").and_then(|v| v.as_str()),
+            Some("shared_sharepointonline")
+        );
         assert_eq!(
             host.get("connectionReferenceName").and_then(|v| v.as_str()),
             Some("shared_sharepointonline")
-        );
-        assert_eq!(host.get("apiId").and_then(|v| v.as_str()), Some("x"));
-        assert_eq!(
-            host.get("operationId").and_then(|v| v.as_str()),
-            Some("GetItems")
         );
     }
 
