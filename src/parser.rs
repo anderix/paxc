@@ -215,12 +215,12 @@ where
 
         let name_spanned = name.map_with(|n, e| (n.to_string(), e.span()));
 
+        let var_init = just(Token::Eq).ignore_then(expr.clone()).or_not();
         let var_decl = just(Token::Var)
             .ignore_then(name_spanned)
             .then_ignore(just(Token::Colon))
             .then(ty)
-            .then_ignore(just(Token::Eq))
-            .then(expr.clone())
+            .then(var_init)
             .map(|(((name, name_span), ty), value)| Stmt::VarDecl {
                 name,
                 name_span,
@@ -526,7 +526,23 @@ mod tests {
             } => {
                 assert_eq!(name, "counter");
                 assert!(matches!(ty, Type::Int));
-                assert!(matches!(value, Expr::Literal(Literal::Int(1))));
+                assert!(matches!(value, Some(Expr::Literal(Literal::Int(1)))));
+            }
+            _ => panic!("expected var decl"),
+        }
+    }
+
+    #[test]
+    fn slice44a_var_decl_no_initializer() {
+        let prog = parse("var todo: string");
+        assert_eq!(prog.statements.len(), 1);
+        match &prog.statements[0] {
+            Stmt::VarDecl {
+                name, ty, value, ..
+            } => {
+                assert_eq!(name, "todo");
+                assert!(matches!(ty, Type::String));
+                assert!(value.is_none());
             }
             _ => panic!("expected var decl"),
         }
@@ -543,7 +559,7 @@ mod tests {
         match &prog.statements[0] {
             Stmt::VarDecl { ty, value, .. } => {
                 assert!(matches!(ty, Type::Array));
-                let Expr::Literal(Literal::Array(items)) = value else {
+                let Some(Expr::Literal(Literal::Array(items))) = value else {
                     panic!("expected array");
                 };
                 assert_eq!(items.len(), 2);

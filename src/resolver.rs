@@ -83,7 +83,10 @@ pub enum ActionKind {
     InitializeVariable {
         var: String,
         ty: Type,
-        value: Expr,
+        /// `None` means the source omitted the initializer (`var x: T`);
+        /// emitter skips the `value` key in PA's variables[0], and paxr
+        /// initializes the runtime variable to its type's zero value.
+        value: Option<Expr>,
     },
     SetVariable {
         var: String,
@@ -616,7 +619,10 @@ fn resolve_statements(
                         span: *name_span,
                     });
                 }
-                let value = resolve_expr(value, env)?;
+                let value = match value {
+                    Some(e) => Some(resolve_expr(e, env)?),
+                    None => None,
+                };
                 env.insert(name.clone(), Binding::Var { ty: ty.clone() });
                 let action_name =
                     unique_name(&format!("{}_{name}", key_prefix::INITIALIZE), name_counts);
@@ -1311,7 +1317,7 @@ mod tests {
             name: name.to_string(),
             name_span: sp(),
             ty: Type::Int,
-            value: Expr::Literal(Literal::Int(0)),
+            value: Some(Expr::Literal(Literal::Int(0))),
         }
     }
 
@@ -1320,7 +1326,7 @@ mod tests {
             name: name.to_string(),
             name_span: sp(),
             ty,
-            value: Expr::Literal(Literal::Int(0)),
+            value: Some(Expr::Literal(Literal::Int(0))),
         }
     }
 
@@ -1410,7 +1416,7 @@ mod tests {
             name: "y".to_string(),
             name_span: sp(),
             ty: Type::Int,
-            value: rref("x"),
+            value: Some(rref("x")),
         };
         let prog = Program {
             statements: vec![var("x"), ref_y],
@@ -1424,7 +1430,7 @@ mod tests {
             name: "y".to_string(),
             name_span: sp(),
             ty: Type::Int,
-            value: rref("nope"),
+            value: Some(rref("nope")),
         };
         let prog = Program {
             statements: vec![ref_y],
@@ -1441,7 +1447,7 @@ mod tests {
             name: "y".to_string(),
             name_span: sp(),
             ty: Type::Int,
-            value: rref("x"),
+            value: Some(rref("x")),
         };
         let prog = Program {
             statements: vec![ref_y, var("x")],
@@ -1627,7 +1633,7 @@ mod tests {
                     name: "mirror".to_string(),
                     name_span: sp(),
                     ty: Type::Int,
-                    value: rref("total"),
+                    value: Some(rref("total")),
                 },
             ],
         };
@@ -1636,7 +1642,7 @@ mod tests {
         match &var_action.kind {
             ActionKind::InitializeVariable { value, .. } => {
                 assert!(
-                    matches!(value, Expr::ComposeRef { action_name, .. } if action_name == "Compose_total")
+                    matches!(value, Some(Expr::ComposeRef { action_name, .. }) if action_name == "Compose_total")
                 );
             }
             _ => panic!("expected InitializeVariable"),
@@ -2425,10 +2431,17 @@ mod tests {
     }
 
     /// Helper: extract the value-expression embedded in the n-th resolved
-    /// action when it is `InitializeVariable`.
+    /// action when it is `InitializeVariable`. Panics if the action is not
+    /// `InitializeVariable` or if the variable was declared without an
+    /// initializer.
     fn init_value(p: &ResolvedProgram, idx: usize) -> &Expr {
         match &p.actions[idx].kind {
-            ActionKind::InitializeVariable { value, .. } => value,
+            ActionKind::InitializeVariable {
+                value: Some(value), ..
+            } => value,
+            ActionKind::InitializeVariable { value: None, .. } => {
+                panic!("expected InitializeVariable with initializer, got no-initializer form")
+            }
             other => panic!("expected InitializeVariable, got {other:?}"),
         }
     }

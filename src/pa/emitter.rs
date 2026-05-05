@@ -381,7 +381,7 @@ fn expr_to_pa_field(expr: &Expr) -> String {
     format!("@{}", pa_expr(expr))
 }
 
-fn emit_initialize(name: &str, ty: &Type, value: &Expr) -> Value {
+fn emit_initialize(name: &str, ty: &Type, value: &Option<Expr>) -> Value {
     let ty_str = match ty {
         Type::Int => "Integer",
         Type::Float => "Float",
@@ -390,13 +390,16 @@ fn emit_initialize(name: &str, ty: &Type, value: &Expr) -> Value {
         Type::Array => "Array",
         Type::Object => "Object",
     };
-    let value_json = expr_to_json(value);
+    let mut var_entry = Map::new();
+    var_entry.insert("name".to_string(), json!(name));
+    var_entry.insert("type".to_string(), json!(ty_str));
+    if let Some(v) = value {
+        var_entry.insert("value".to_string(), expr_to_json(v));
+    }
     json!({
         "type": action::INITIALIZE_VARIABLE,
         "inputs": {
-            "variables": [
-                { "name": name, "type": ty_str, "value": value_json }
-            ]
+            "variables": [Value::Object(var_entry)]
         }
     })
 }
@@ -501,6 +504,23 @@ mod tests {
         assert_eq!(action["inputs"]["variables"][0]["type"], "Integer");
         assert_eq!(action["inputs"]["variables"][0]["value"], 1);
         assert_eq!(action["runAfter"], json!({}));
+    }
+
+    #[test]
+    fn slice44a_initialize_variable_omits_value_when_no_initializer() {
+        let out = compile("var todo: string");
+        let action = &out["definition"]["actions"]["Initialize_todo"];
+        assert_eq!(action["type"], "InitializeVariable");
+        let var_entry = &action["inputs"]["variables"][0];
+        assert_eq!(var_entry["name"], "todo");
+        assert_eq!(var_entry["type"], "String");
+        // Critical: the `value` key must be ABSENT, not present-with-null. PA
+        // distinguishes between "no initial value" and "null literal value";
+        // emitter must mirror that.
+        assert!(
+            var_entry.get("value").is_none(),
+            "no-initializer var must omit the `value` key entirely; got {var_entry:?}"
+        );
     }
 
     #[test]

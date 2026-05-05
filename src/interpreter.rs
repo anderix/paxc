@@ -330,14 +330,20 @@ impl<'src> Interpreter<'src> {
     ) -> Result<(), InterpretError> {
         match &action.kind {
             ActionKind::InitializeVariable { var, ty, value } => {
-                let v = self.eval(value)?;
-                // Coerce numeric init values to match the declared type so
-                // floatness survives later increments. `var x: float = 5`
-                // stores Float(5.0), not Int(5) -- otherwise `x += 1` would
-                // stay in int-land and silently lose the declared type.
-                let v = match (ty, &v) {
-                    (Type::Float, Value::Int(n)) => Value::Float(*n as f64),
-                    _ => v,
+                let v = match value {
+                    Some(expr) => {
+                        let v = self.eval(expr)?;
+                        // Coerce numeric init values to match the declared
+                        // type so floatness survives later increments.
+                        // `var x: float = 5` stores Float(5.0), not Int(5)
+                        // -- otherwise `x += 1` would stay in int-land and
+                        // silently lose the declared type.
+                        match (ty, &v) {
+                            (Type::Float, Value::Int(n)) => Value::Float(*n as f64),
+                            _ => v,
+                        }
+                    }
+                    None => zero_value_for(ty),
                 };
                 self.trace(&format!("init {var} = {}", v.display_compact()));
                 self.vars.insert(var.clone(), v);
@@ -710,6 +716,20 @@ fn render_for_dump(v: &Value) -> String {
     }
 }
 
+/// Default initial value for an InitializeVariable action that omitted its
+/// `value` field. Mirrors PA's runtime behavior: unset numerics start at 0,
+/// unset booleans at false, unset strings empty, unset composites empty.
+fn zero_value_for(ty: &Type) -> Value {
+    match ty {
+        Type::Int => Value::Int(0),
+        Type::Float => Value::Float(0.0),
+        Type::String => Value::Str(String::new()),
+        Type::Bool => Value::Bool(false),
+        Type::Array => Value::Array(Vec::new()),
+        Type::Object => Value::Object(Vec::new()),
+    }
+}
+
 fn literal_to_value(lit: &Literal) -> Value {
     match lit {
         Literal::Null => Value::Null,
@@ -913,6 +933,39 @@ mod tests {
     #[test]
     fn executes_arithmetic_and_comparisons() {
         run("var x: int = 3\nx += 4\nlet ok = x == 7\n").unwrap();
+    }
+
+    #[test]
+    fn slice44a_var_no_initializer_zero_inits_per_type() {
+        // Each declared type without an initializer should land at PA's
+        // zero value: 0, 0.0, "", false, [], {}.
+        let state = run("var i: int\n\
+             var f: float\n\
+             var s: string\n\
+             var b: bool\n\
+             var a: array\n\
+             var o: object\n")
+        .unwrap();
+        assert!(matches!(state.vars.get("i"), Some(Value::Int(0))));
+        assert!(matches!(state.vars.get("f"), Some(Value::Float(x)) if *x == 0.0));
+        assert!(matches!(state.vars.get("s"), Some(Value::Str(s)) if s.is_empty()));
+        assert!(matches!(state.vars.get("b"), Some(Value::Bool(false))));
+        assert!(matches!(state.vars.get("a"), Some(Value::Array(items)) if items.is_empty()));
+        assert!(matches!(state.vars.get("o"), Some(Value::Object(entries)) if entries.is_empty()));
+    }
+
+    #[test]
+    fn slice44a_var_no_initializer_then_mutated() {
+        // PA's typical pattern: declare without init, then append/set.
+        // Confirms zero-init kicks in and downstream mutations work.
+        let state = run("var todo: string\n\
+             todo &= \"hello\"\n\
+             todo &= \" world\"\n\
+             var n: int\n\
+             n += 5\n")
+        .unwrap();
+        assert!(matches!(state.vars.get("todo"), Some(Value::Str(s)) if s == "hello world"));
+        assert!(matches!(state.vars.get("n"), Some(Value::Int(5))));
     }
 
     #[test]

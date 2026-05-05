@@ -27,7 +27,12 @@ pub enum Stmt {
         /// Span of the declared name identifier, used by diagnostics.
         name_span: Span,
         ty: Type,
-        value: Expr,
+        /// Initializer expression. `None` means "no initializer in source"
+        /// (`var x: T`); paxc omits the `value` key from PA's
+        /// `InitializeVariable.inputs.variables[0]`, and PA initializes the
+        /// variable to its type's zero value at runtime. paxr mirrors that
+        /// behavior locally.
+        value: Option<Expr>,
     },
     Assign {
         name: String,

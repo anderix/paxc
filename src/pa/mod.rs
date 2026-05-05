@@ -6,6 +6,7 @@
 //! be target-agnostic where reasonable; when they need a PA name, they
 //! pull it from here rather than inlining the string.
 
+pub mod decoder;
 pub mod emitter;
 pub mod functions;
 pub mod names;

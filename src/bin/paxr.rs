@@ -18,6 +18,10 @@ fn main() {
     let mut positional: Vec<String> = Vec::new();
     for arg in argv {
         match arg.as_str() {
+            "--version" | "-V" => {
+                println!("paxr {}", env!("CARGO_PKG_VERSION"));
+                process::exit(0);
+            }
             "--verbose" | "-v" => verbose = true,
             "--quiet" | "-q" => quiet = true,
             "--debug" | "-d" => debug_only = true,

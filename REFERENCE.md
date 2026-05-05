@@ -94,6 +94,8 @@ var config: object = {
 
 A `var` declaration compiles to a Power Automate `InitializeVariable` action named `Initialize_<name>`. The six v1 types are `int`, `float`, `string`, `bool`, `array`, and `object`. Float literals require at least one digit after the decimal point (`1.5`, `0.25`), so identifier access like `obj.field` is never ambiguous. Int and float mix freely in arithmetic and comparisons: any float operand promotes the result to float, while int operated on int stays int (including `/`, which matches Power Automate's integer-division behavior). An int literal assigned to a float-typed variable is coerced at initialization, so `var budget: float = 5` followed by `budget += 0.5` gives `5.5`, not an int. Array and object literals use JSON-like syntax, and trailing commas are permitted.
 
+The initializer is optional. `var todo: string` (no `= ...`) emits an `InitializeVariable` whose `value` field is omitted; Power Automate then runs the variable up at the type's zero value (0 for int, 0.0 for float, empty string for string, false for bool, empty array for array, empty object for object). The paxr interpreter mirrors that behavior locally. The no-initializer form is the default shape produced by the Power Automate designer, so it's what you typically see when round-tripping an existing flow into pax.
+
 One paxr-specific note on equality: the interpreter treats `5 == 5.0` as true so numeric comparisons across the two types behave sanely during local simulation. Power Automate's expression language uses strict JToken equality and would consider those unequal, so do not rely on cross-type `==` for business logic. The stub-and-fix workflow tests the real flow in Power Automate anyway.
 
 ## let and Compose
@@ -468,7 +470,7 @@ The practical consequence: you write pax the way you'd write any imperative code
 
 ## Running paxc and paxr
 
-paxc has two modes. Without `--target`, it writes flow JSON to stdout for inspection:
+paxc has three modes. Without `--target`, it writes flow JSON to stdout for inspection:
 
 ```
 $ paxc flow.pax > flow.json
@@ -480,7 +482,13 @@ With `--target pa-legacy`, it writes an importable package zip:
 $ paxc --target pa-legacy --name myflow --out myflow.zip flow.pax
 ```
 
-The package is a legacy-format Power Automate zip. Import it through the Power Automate portal at **My flows > Import > Import Package (Legacy)**. If `--name` is omitted, the package name is derived from the source filename.
+The package is a legacy-format Power Automate zip. Import it through the Power Automate portal at **My flows > Import > Import Package (Legacy)**. If `--name` is omitted, paxc looks for a `displayName` field in `pa/flow.json` and uses it; if that's also missing, the package name falls back to the source filename. This means a decoded flow re-encodes back to its original Power Automate display name without any flag plumbing.
+
+With `--decode`, paxc runs in reverse: it reads an exported PA flow JSON and produces a `.pax` source file plus a `pa/` folder of opaque action bodies (see the next section).
+
+```
+$ paxc --decode flow.json --out-dir flow_src/
+```
 
 paxr takes a pax source file and interprets it locally:
 
@@ -491,7 +499,30 @@ $ paxr -q flow.pax         # quiet: suppresses all output (exit code only)
 $ paxr -d flow.pax         # debug: prints only debug() output
 ```
 
+Both binaries also accept `--version` (or `-V`) to print the installed version.
+
 Running a flow through paxr first is a fast sanity check before making the round-trip through Power Automate.
+
+## Round-tripping from PA exports
+
+Existing Power Automate flows live as JSON inside legacy-format export packages (the same shape paxc produces with `--target pa-legacy`). paxc can decode the inner `definition.json` back into pax source so you can refactor, version-control, and recompile a flow without rebuilding it in the designer:
+
+```
+$ unzip MyFlow_2026.zip -d /tmp/exported
+$ paxc --decode /tmp/exported/Microsoft.Flow/flows/<guid>/definition.json --out-dir my_flow/
+```
+
+This writes:
+
+- `my_flow/definition.pax` — the decoded source (named after the input file's stem).
+- `my_flow/pa/<TriggerName>.trigger.json` — the trigger body, byte-for-byte from the export.
+- `my_flow/pa/<ActionName>.json` — one file per action that didn't lower to a pax-native statement (connectors, ParseJson, container actions in slice 44a, anything with PA expression initializers, etc.).
+- `my_flow/pa/connectionReferences.json` — when present in the export, the top-level connection references dict.
+- `my_flow/pa/flow.json` — small metadata file with the flow's `displayName`, `contentVersion`, and (when applicable) an `actionNameMap` recording PA action keys that had to be normalized to valid pax identifiers (anything containing `(`, `)`, `!`, spaces, etc.).
+
+What lowers natively in slice 44a: the variable lifecycle actions only — `InitializeVariable`, `SetVariable`, `IncrementVariable`, `DecrementVariable`, `AppendToStringVariable`, `AppendToArrayVariable` — and only when their `value` field is a JSON literal (no `@variables(...)` style expressions). Anything else falls back to `pa <Name>` with the action body in `pa/<Name>.json`. This is intentional: the round-trip is lossless even when the native-decode coverage is partial, because falls-back are emitted byte-for-byte from the file. paxc prints a stderr warning per fallback so you can see exactly what didn't decode natively. Future sub-slices extend the native-decode set to Compose, container actions, on-handlers, terminate, and PA-expression translation.
+
+Re-encoding the decoded source with `paxc --target pa-legacy` reproduces the original flow's structure. The corpus harness in `tests/decoder.rs` round-trips a set of real PA exports as part of `cargo test`; drop a `definition.json` into `tests/corpus/<name>/input.json` to add coverage for new patterns.
 
 ## More examples
 
