@@ -23,10 +23,12 @@ fn usage() -> ! {
            --out   <name>.zip in the current directory\n\
          \n\
          Decode mode (round-trip ingest):\n\
-           paxc --decode <flow.json> [--out-dir <DIR>]\n\
-         Reads an exported PA flow JSON and writes a .pax source file plus a\n\
-         pa/ folder of opaque action bodies to <DIR> (defaults to the input's\n\
-         parent directory)."
+           paxc --decode <flow.json|flow.zip> [--out-dir <DIR>]\n\
+         Reads an exported PA flow definition (either the inner definition.json\n\
+         or a legacy import package .zip) and writes a .pax source file plus a\n\
+         pa/ folder of opaque action bodies to <DIR>. For a .json input, --out-dir\n\
+         defaults to the input's parent directory; for a .zip, it defaults to a\n\
+         sister directory named after the zip's stem."
     );
     process::exit(2);
 }
@@ -187,8 +189,7 @@ fn run_decode(args: &Args) {
     let out_dir = args
         .out_dir
         .clone()
-        .or_else(|| input_path.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(|| default_decode_out_dir(input_path));
     match decoder::decode_file(input_path, &out_dir) {
         Ok(report) => {
             for w in &report.warnings {
@@ -222,4 +223,30 @@ fn derive_name_from_path(path: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("flow")
         .to_string()
+}
+
+/// Pick the default output directory for `--decode` when the user didn't
+/// pass `--out-dir`. For a `.json` input, that's the input file's parent
+/// directory (the existing behavior). For a `.zip` input, dropping a
+/// `pa/` folder next to the zip would clutter the user's working dir, so
+/// instead we sit a sister directory named after the zip's stem alongside
+/// the zip itself (`MyFlow_2026.zip` → `MyFlow_2026/`).
+fn default_decode_out_dir(input_path: &Path) -> PathBuf {
+    let is_zip = input_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
+    let parent = input_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    if is_zip {
+        let stem = input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("flow");
+        parent.join(stem)
+    } else {
+        parent
+    }
 }

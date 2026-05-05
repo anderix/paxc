@@ -57,6 +57,18 @@ pub enum DecodeError {
     MultipleTriggers(Vec<String>),
     /// `runAfter` graph contains a cycle — defensive; PA shouldn't allow it.
     Cycle { actions_remaining: Vec<String> },
+    /// Input was a zip but contained no `Microsoft.Flow/flows/<GUID>/definition.json`
+    /// entry — not a recognizable PA legacy package.
+    NoFlowInPackage { path: PathBuf },
+    /// Input zip contains more than one flow folder. Pax decodes a single
+    /// flow; users must extract the desired `definition.json` and point
+    /// `--decode` at that file directly.
+    MultipleFlowsInPackage { path: PathBuf, flows: Vec<String> },
+    /// Underlying zip read error (corrupt archive, etc.).
+    Zip {
+        path: PathBuf,
+        source: zip::result::ZipError,
+    },
 }
 
 impl std::fmt::Display for DecodeError {
@@ -79,6 +91,21 @@ impl std::fmt::Display for DecodeError {
                 "runAfter graph contains a cycle; unresolvable: {}",
                 actions_remaining.join(", ")
             ),
+            DecodeError::NoFlowInPackage { path } => write!(
+                f,
+                "no Microsoft.Flow/flows/<GUID>/definition.json entry in {}",
+                path.display()
+            ),
+            DecodeError::MultipleFlowsInPackage { path, flows } => write!(
+                f,
+                "package {} contains {} flows ({}); decode targets a single flow — extract the desired definition.json and point --decode at that file directly",
+                path.display(),
+                flows.len(),
+                flows.join(", ")
+            ),
+            DecodeError::Zip { path, source } => {
+                write!(f, "zip read error at {}: {source}", path.display())
+            }
         }
     }
 }
@@ -88,11 +115,24 @@ impl std::error::Error for DecodeError {}
 /// Top-level entry: read a PA flow JSON from `input_path` and write the
 /// decoded pax source + `pa/` folder under `out_dir`. Output basename is
 /// derived from the input file stem.
+///
+/// `input_path` may be either a raw `definition.json` or a PA legacy import
+/// package `.zip`. Detection is by file extension (case-insensitive); when
+/// it's a zip, the inner `Microsoft.Flow/flows/<GUID>/definition.json` is
+/// extracted in-memory and decoded as if it had been passed directly.
 pub fn decode_file(input_path: &Path, out_dir: &Path) -> Result<DecodeReport, DecodeError> {
-    let bytes = fs::read(input_path).map_err(|e| DecodeError::Io {
-        path: input_path.to_path_buf(),
-        source: e,
-    })?;
+    let is_zip = input_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
+    let bytes = if is_zip {
+        read_definition_from_zip(input_path)?
+    } else {
+        fs::read(input_path).map_err(|e| DecodeError::Io {
+            path: input_path.to_path_buf(),
+            source: e,
+        })?
+    };
     let input: Value = serde_json::from_slice(&bytes).map_err(|e| DecodeError::JsonParse {
         path: input_path.to_path_buf(),
         source: e,
@@ -103,6 +143,71 @@ pub fn decode_file(input_path: &Path, out_dir: &Path) -> Result<DecodeReport, De
         .unwrap_or("flow")
         .to_string();
     decode(&input, &basename, out_dir)
+}
+
+/// Locate and extract the inner `definition.json` from a PA legacy package.
+/// Returns the file's bytes verbatim, ready to feed into the JSON parser.
+/// Errors if the zip is unreadable, contains zero flows, or contains more
+/// than one flow folder under `Microsoft.Flow/flows/`.
+fn read_definition_from_zip(input_path: &Path) -> Result<Vec<u8>, DecodeError> {
+    use std::io::Read;
+    let file = fs::File::open(input_path).map_err(|e| DecodeError::Io {
+        path: input_path.to_path_buf(),
+        source: e,
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| DecodeError::Zip {
+        path: input_path.to_path_buf(),
+        source: e,
+    })?;
+    // Collect inner definition.json paths grouped by their parent flow folder.
+    // Legacy package shape: `Microsoft.Flow/flows/<GUID>/definition.json`. We
+    // accept either forward or back slashes (some zip producers vary).
+    let mut definitions: Vec<(String, String)> = Vec::new();
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| DecodeError::Zip {
+            path: input_path.to_path_buf(),
+            source: e,
+        })?;
+        let name = entry.name().replace('\\', "/");
+        if let Some(flow_id) = match_flow_definition_path(&name) {
+            definitions.push((flow_id, name));
+        }
+    }
+    match definitions.len() {
+        0 => Err(DecodeError::NoFlowInPackage {
+            path: input_path.to_path_buf(),
+        }),
+        1 => {
+            let (_, name) = definitions.into_iter().next().unwrap();
+            let mut entry = archive.by_name(&name).map_err(|e| DecodeError::Zip {
+                path: input_path.to_path_buf(),
+                source: e,
+            })?;
+            let mut bytes = Vec::with_capacity(entry.size() as usize);
+            entry.read_to_end(&mut bytes).map_err(|e| DecodeError::Io {
+                path: input_path.to_path_buf(),
+                source: e,
+            })?;
+            Ok(bytes)
+        }
+        _ => Err(DecodeError::MultipleFlowsInPackage {
+            path: input_path.to_path_buf(),
+            flows: definitions.into_iter().map(|(id, _)| id).collect(),
+        }),
+    }
+}
+
+/// Recognize `Microsoft.Flow/flows/<flow_id>/definition.json` and return
+/// the flow id segment. Returns None for any other entry. The flow id is
+/// usually a GUID but the matcher doesn't enforce that — anything that
+/// isn't empty and doesn't contain a slash is accepted.
+fn match_flow_definition_path(name: &str) -> Option<String> {
+    let suffix = name.strip_prefix("Microsoft.Flow/flows/")?;
+    let (flow_id, tail) = suffix.split_once('/')?;
+    if tail != "definition.json" || flow_id.is_empty() {
+        return None;
+    }
+    Some(flow_id.to_string())
 }
 
 /// Decode an in-memory PA flow JSON to disk. `basename` (without extension)
@@ -1393,6 +1498,27 @@ mod tests {
 
     fn used() -> HashSet<String> {
         HashSet::new()
+    }
+
+    // ---------- 45a polish: zip-input detection ----------
+
+    #[test]
+    fn match_flow_definition_path_recognizes_legacy_layout() {
+        assert_eq!(
+            match_flow_definition_path("Microsoft.Flow/flows/abc-123/definition.json"),
+            Some("abc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn match_flow_definition_path_rejects_other_files() {
+        assert!(match_flow_definition_path("Microsoft.Flow/flows/abc-123/manifest.json").is_none());
+        assert!(match_flow_definition_path("manifest.json").is_none());
+        assert!(
+            match_flow_definition_path("Microsoft.Flow/flows/abc-123/sub/definition.json")
+                .is_none()
+        );
+        assert!(match_flow_definition_path("Microsoft.Flow/flows//definition.json").is_none());
     }
 
     // ---------- normalize_action_key ----------
@@ -2870,5 +2996,92 @@ mod tests {
         let report = decode(&input, "x", &dir).unwrap();
         let pax = read(&report.pax_path);
         assert!(pax.contains("pa On_either_failed"), "pax was: {pax}");
+    }
+
+    // ---------- 45a polish: end-to-end zip input ----------
+
+    /// Build a minimal PA legacy package zip in memory and return its path.
+    /// `flows` is a list of `(flow_id, definition_json_bytes)` to embed —
+    /// pass one entry for the happy path, two for the multi-flow case, zero
+    /// for the no-flow case.
+    fn write_test_zip(label: &str, flows: &[(&str, &[u8])]) -> PathBuf {
+        use std::io::Write;
+        let dir = tmp_dir(label);
+        let zip_path = dir.join(format!("{label}.zip"));
+        let f = fs::File::create(&zip_path).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let opts: zip::write::SimpleFileOptions = Default::default();
+        zw.start_file("manifest.json", opts).unwrap();
+        zw.write_all(b"{}").unwrap();
+        for (flow_id, def) in flows {
+            zw.start_file(
+                format!("Microsoft.Flow/flows/{flow_id}/definition.json"),
+                opts,
+            )
+            .unwrap();
+            zw.write_all(def).unwrap();
+        }
+        zw.finish().unwrap();
+        zip_path
+    }
+
+    fn minimal_definition_json() -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "properties": {
+                "displayName": "Z",
+                "definition": {
+                    "triggers": {
+                        "manual": { "type": "Request", "kind": "Button", "inputs": {} }
+                    },
+                    "actions": {
+                        "Initialize_x": {
+                            "type": "InitializeVariable",
+                            "runAfter": {},
+                            "inputs": {
+                                "variables": [{ "name": "x", "type": "Integer", "value": 1 }]
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn decode_file_accepts_zip_input() {
+        let zip_path = write_test_zip("zip_happy", &[("guid-1", &minimal_definition_json())]);
+        let out = tmp_dir("zip_happy_out");
+        let report = decode_file(&zip_path, &out).expect("decode failed");
+        let pax = read(&report.pax_path);
+        assert!(pax.contains("var x: int = 1"), "pax was: {pax}");
+        assert!(report.pax_path.starts_with(&out));
+    }
+
+    #[test]
+    fn decode_file_rejects_zip_with_no_flow() {
+        let zip_path = write_test_zip("zip_empty", &[]);
+        let out = tmp_dir("zip_empty_out");
+        let err = decode_file(&zip_path, &out).expect_err("should fail");
+        assert!(
+            matches!(err, DecodeError::NoFlowInPackage { .. }),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn decode_file_rejects_zip_with_multiple_flows() {
+        let def = minimal_definition_json();
+        let zip_path = write_test_zip("zip_multi", &[("guid-a", &def), ("guid-b", &def)]);
+        let out = tmp_dir("zip_multi_out");
+        let err = decode_file(&zip_path, &out).expect_err("should fail");
+        match err {
+            DecodeError::MultipleFlowsInPackage { flows, .. } => {
+                assert_eq!(flows.len(), 2);
+                assert!(flows.contains(&"guid-a".to_string()));
+                assert!(flows.contains(&"guid-b".to_string()));
+            }
+            other => panic!("wrong error: {other}"),
+        }
     }
 }

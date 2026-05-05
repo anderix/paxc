@@ -526,9 +526,11 @@ Running a flow through paxr first is a fast sanity check before making the round
 Existing Power Automate flows live as JSON inside legacy-format export packages (the same shape paxc produces with `--target pa-legacy`). paxc can decode the inner `definition.json` back into pax source so you can refactor, version-control, and recompile a flow without rebuilding it in the designer:
 
 ```
-$ unzip MyFlow_2026.zip -d /tmp/exported
-$ paxc --decode /tmp/exported/Microsoft.Flow/flows/<guid>/definition.json --out-dir my_flow/
+$ paxc --decode MyFlow_2026.zip                # zip input — output dir defaults to MyFlow_2026/
+$ paxc --decode definition.json --out-dir my_flow/   # raw inner-definition input
 ```
+
+`--decode` accepts either a PA legacy import package `.zip` (the file you get from PA's "Export → Package (Legacy)") or the inner `Microsoft.Flow/flows/<guid>/definition.json` directly. For zip input, the inner definition is extracted in-memory; if the zip contains zero or more than one flow folder, paxc errors with a clear message rather than guessing. Default `--out-dir` is the input's parent directory for `.json`, or a sister directory named after the zip's stem for `.zip`.
 
 This writes:
 
