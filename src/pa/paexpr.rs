@@ -34,7 +34,7 @@
 //! (date/time literals, complex operators, etc.) is not exhaustively covered;
 //! anything outside this subset returns None and the caller falls back.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// A JSON-like value used as a PA literal inside expressions or value slots.
 /// Mirrors the subset of `serde_json::Value` we can render in pax source.
@@ -471,8 +471,26 @@ impl<'a> Parser<'a> {
 /// source. The decoder threads this so the translator knows which names
 /// are already declared in the emitted pax (only declared names can be
 /// referenced via `variables('x')` / `outputs('Compose_x')` lowering).
+///
+/// `iterators` maps a PA `Foreach`/`Apply_to_each` action key to the pax
+/// iterator name in scope at the call site. When a `items('<key>')`
+/// expression appears inside a foreach body and `<key>` is in this map, the
+/// translator emits the pax iterator name. Outside any foreach scope (or
+/// for an unknown key) `items(...)` forces fallback.
 pub(super) struct RenderCtx<'a> {
     pub bindings: &'a HashSet<String>,
+    pub iterators: &'a HashMap<String, String>,
+}
+
+impl<'a> RenderCtx<'a> {
+    /// Convenience for callers that don't have an iterator scope: pass an
+    /// empty map. Most slice 44a/b/c call sites use this.
+    pub fn new(bindings: &'a HashSet<String>, iterators: &'a HashMap<String, String>) -> Self {
+        Self {
+            bindings,
+            iterators,
+        }
+    }
 }
 
 /// Top-level: render a parsed PA value to pax source. Returns None if any
@@ -485,6 +503,13 @@ pub(super) fn render_pa_value(value: &PaValue, ctx: &RenderCtx<'_>) -> Option<St
         PaValue::Expression(expr) => render_expr(expr, ctx),
         PaValue::Template(parts) => render_template(parts, ctx),
     }
+}
+
+/// Render a `PaLit` as a pax source literal. Sibling modules call this
+/// when they need to format an extracted literal (e.g. a Switch case value)
+/// the same way the rest of the translator would.
+pub(super) fn render_pa_lit(lit: &PaLit) -> Option<String> {
+    render_literal(lit)
 }
 
 fn render_literal(lit: &PaLit) -> Option<String> {
@@ -519,8 +544,9 @@ fn render_call(name: &str, args: &[PaExpr], ctx: &RenderCtx<'_>) -> Option<Strin
     match name {
         "variables" => return render_var_accessor(args, ctx),
         "outputs" => return render_output_accessor(args, ctx),
-        // Accessors with no native pax form at slice 44c.
-        "items" | "iterationIndexes" | "triggerBody" | "triggerOutputs" | "trigger" | "actions"
+        "items" => return render_items_accessor(args, ctx),
+        // Accessors with no native pax form at slice 44d.
+        "iterationIndexes" | "triggerBody" | "triggerOutputs" | "trigger" | "actions"
         | "parameters" | "body" => return None,
         _ => {}
     }
@@ -562,6 +588,21 @@ fn render_var_accessor(args: &[PaExpr], ctx: &RenderCtx<'_>) -> Option<String> {
         return None;
     }
     Some(key)
+}
+
+/// `items('<foreach_key>')` → `<pax_iter_name>` if the key is in the
+/// current foreach iterator scope. Pax body code references the iterator
+/// by the local pax name, not by the underlying PA action key.
+fn render_items_accessor(args: &[PaExpr], ctx: &RenderCtx<'_>) -> Option<String> {
+    if args.len() != 1 {
+        return None;
+    }
+    let key = string_arg(&args[0])?;
+    let pax_name = ctx.iterators.get(&key)?;
+    if PAX_KEYWORDS.contains(&pax_name.as_str()) {
+        return None;
+    }
+    Some(pax_name.clone())
 }
 
 /// `outputs('Compose_<id>')` → `<id>` if `<id>` is declared as a let.
@@ -808,20 +849,133 @@ pub(super) fn json_to_pax(v: &serde_json::Value, ctx: &RenderCtx<'_>) -> Option<
     None
 }
 
+/// Lift a `serde_json::Value` to a `PaExpr` so it can be embedded as an
+/// argument inside another `PaExpr::Call`. Used by the object-form
+/// condition decoder when an `equals: [a, b]` arm has a literal arg
+/// alongside an `@`-prefixed PA expression arg.
+fn json_to_pa_expr(v: &serde_json::Value) -> Option<PaExpr> {
+    if let Some(lit) = json_to_pa_lit(v) {
+        return Some(PaExpr::Lit(lit));
+    }
+    if let serde_json::Value::String(s) = v {
+        let value = parse_pa_string(s)?;
+        return match value {
+            PaValue::Literal(lit) => Some(PaExpr::Lit(lit)),
+            PaValue::Expression(expr) => Some(expr),
+            // A templated string can't appear as a sub-expression of a
+            // PA condition object — PA wouldn't write that. Bail.
+            PaValue::Template(_) => None,
+        };
+    }
+    None
+}
+
+/// Decode PA's *condition object* form (used by `If` / `Until`-with-object)
+/// into a pax expression source string. PA's designer exports If's
+/// `expression` field as a structured JSON object like:
+///
+/// ```json
+/// {"and": [{"equals": ["@variables('approved')", true]}]}
+/// ```
+///
+/// rather than the `@`-prefixed string form paxc itself emits. This entry
+/// point handles both shapes: a string flows through `parse_pa_string` and
+/// renders as a normal PA expression; an object is interpreted recursively
+/// as a `PaExpr::Call` with the JSON key as the function name and its array
+/// of children as arguments. Unary forms (`{"not": <inner>}` with a single
+/// non-array child) are accepted; everything else expects an array.
+///
+/// Returns None if any node can't be rendered or the structure is unfamiliar.
+pub(super) fn condition_value_to_pax(v: &serde_json::Value, ctx: &RenderCtx<'_>) -> Option<String> {
+    let expr = condition_value_to_pa_expr(v)?;
+    render_expr(&expr, ctx)
+}
+
+fn condition_value_to_pa_expr(v: &serde_json::Value) -> Option<PaExpr> {
+    use serde_json::Value;
+    match v {
+        Value::String(s) => {
+            let value = parse_pa_string(s)?;
+            match value {
+                PaValue::Literal(lit) => Some(PaExpr::Lit(lit)),
+                PaValue::Expression(expr) => Some(expr),
+                PaValue::Template(_) => None,
+            }
+        }
+        Value::Object(map) => {
+            // PA's condition operators each appear as a single-key object
+            // whose value is an array of operand expressions. Multi-key
+            // shapes (or unknown ops) fall back.
+            if map.len() != 1 {
+                return None;
+            }
+            let (op, operand) = map.iter().next().unwrap();
+            // Recognized operators. The list mirrors PA's condition vocabulary
+            // observed in real exports; anything outside this set forces fallback
+            // so paxc never invents a pax operator that PA didn't write.
+            const KNOWN_OPS: &[&str] = &[
+                "and",
+                "or",
+                "not",
+                "equals",
+                "less",
+                "lessOrEquals",
+                "greater",
+                "greaterOrEquals",
+                "contains",
+                "startsWith",
+                "endsWith",
+                "empty",
+            ];
+            if !KNOWN_OPS.contains(&op.as_str()) {
+                return None;
+            }
+            let args: Vec<PaExpr> = match operand {
+                Value::Array(items) => items
+                    .iter()
+                    .map(condition_value_to_pa_expr)
+                    .collect::<Option<Vec<_>>>()?,
+                // Not-operator can take a single non-array child in some
+                // exports; coerce to a one-arg vec for uniform Call shape.
+                _ if op == "not" => vec![condition_value_to_pa_expr(operand)?],
+                _ => return None,
+            };
+            Some(PaExpr::Call {
+                name: op.clone(),
+                args,
+            })
+        }
+        // Bare bool/number/string-without-`@` literals are valid condition
+        // operands (they appear as the right-hand side of `equals`) but the
+        // top-level `expression` field is always a string or object in PA.
+        // Still accept them defensively for compositional reuse.
+        _ => json_to_pa_expr(v),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn ctx_with(names: &[&str]) -> (HashSet<String>, ()) {
+    fn ctx_with(names: &[&str]) -> (HashSet<String>, HashMap<String, String>) {
         let set: HashSet<String> = names.iter().map(|s| s.to_string()).collect();
-        (set, ())
+        (set, HashMap::new())
     }
 
     fn render(s: &str, names: &[&str]) -> Option<String> {
-        let (bindings, _) = ctx_with(names);
-        let ctx = RenderCtx {
-            bindings: &bindings,
-        };
+        let (bindings, iterators) = ctx_with(names);
+        let ctx = RenderCtx::new(&bindings, &iterators);
+        let value = parse_pa_string(s)?;
+        render_pa_value(&value, &ctx)
+    }
+
+    fn render_with_iterators(s: &str, names: &[&str], iters: &[(&str, &str)]) -> Option<String> {
+        let bindings: HashSet<String> = names.iter().map(|s| s.to_string()).collect();
+        let iterators: HashMap<String, String> = iters
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let ctx = RenderCtx::new(&bindings, &iterators);
         let value = parse_pa_string(s)?;
         render_pa_value(&value, &ctx)
     }
@@ -1197,9 +1351,8 @@ mod tests {
     #[test]
     fn json_to_pax_int_passthrough() {
         let bindings = HashSet::new();
-        let ctx = RenderCtx {
-            bindings: &bindings,
-        };
+        let iters = HashMap::new();
+        let ctx = RenderCtx::new(&bindings, &iters);
         assert_eq!(
             json_to_pax(&serde_json::json!(42), &ctx).as_deref(),
             Some("42")
@@ -1209,9 +1362,8 @@ mod tests {
     #[test]
     fn json_to_pax_string_with_at_routes_to_expression_path() {
         let bindings: HashSet<String> = ["x"].iter().map(|s| s.to_string()).collect();
-        let ctx = RenderCtx {
-            bindings: &bindings,
-        };
+        let iters = HashMap::new();
+        let ctx = RenderCtx::new(&bindings, &iters);
         assert_eq!(
             json_to_pax(&serde_json::json!("@variables('x')"), &ctx).as_deref(),
             Some("x")
@@ -1221,12 +1373,113 @@ mod tests {
     #[test]
     fn json_to_pax_plain_string_quotes_it() {
         let bindings = HashSet::new();
-        let ctx = RenderCtx {
-            bindings: &bindings,
-        };
+        let iters = HashMap::new();
+        let ctx = RenderCtx::new(&bindings, &iters);
         assert_eq!(
             json_to_pax(&serde_json::json!("plain"), &ctx).as_deref(),
             Some("\"plain\"")
         );
+    }
+
+    // ---------- 44d: items() iterator accessor ----------
+
+    #[test]
+    fn items_accessor_resolves_to_pax_iter_name() {
+        // Inside a foreach body, `items('For_each')` is a reference to the
+        // current iteration value. The decoder maps the PA action key
+        // (`For_each`) to the pax iterator name (`item`) via RenderCtx.
+        let out = render_with_iterators("@items('For_each')", &[], &[("For_each", "item")]);
+        assert_eq!(out.as_deref(), Some("item"));
+    }
+
+    #[test]
+    fn items_accessor_with_member_access() {
+        let out = render_with_iterators(
+            "@{items('For_each')?['name']}",
+            &[],
+            &[("For_each", "item")],
+        );
+        assert_eq!(out.as_deref(), Some("item.name"));
+    }
+
+    #[test]
+    fn items_accessor_unknown_key_falls_back() {
+        // `items('SomeOtherForeach')` not in the iterators map → None.
+        let out = render_with_iterators("@items('SomeOtherForeach')", &[], &[("For_each", "item")]);
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn items_accessor_with_no_iter_scope_falls_back() {
+        // Outside any foreach body, `items(...)` has no native form.
+        assert!(render("@items('For_each')", &[]).is_none());
+    }
+
+    // ---------- 44d: condition object form ----------
+
+    fn cond(v: serde_json::Value, names: &[&str]) -> Option<String> {
+        let bindings: HashSet<String> = names.iter().map(|s| s.to_string()).collect();
+        let iters = HashMap::new();
+        let ctx = RenderCtx::new(&bindings, &iters);
+        condition_value_to_pax(&v, &ctx)
+    }
+
+    #[test]
+    fn condition_string_form_renders_via_existing_path() {
+        // Plain `@`-prefixed expression strings work the same as elsewhere.
+        let out = cond(serde_json::json!("@variables('approved')"), &["approved"]);
+        assert_eq!(out.as_deref(), Some("approved"));
+    }
+
+    #[test]
+    fn condition_object_and_equals_to_pax_chain() {
+        // PA designer's `if approved == true`:
+        //   {"and":[{"equals":["@variables('approved')", true]}]}
+        // The `and([equals(...)])` round-trips back to paxc's emitter as
+        // `and(equals(...))` which the optimizer treats correctly. We render
+        // the literal object form to its semantic equivalent.
+        let v = serde_json::json!({
+            "and": [{ "equals": ["@variables('approved')", true] }]
+        });
+        let out = cond(v, &["approved"]);
+        // Single-arg `and` doesn't get the && operator (we require ≥2);
+        // the generic-call path emits `and((approved == true))`.
+        assert_eq!(out.as_deref(), Some("and((approved == true))"));
+    }
+
+    #[test]
+    fn condition_object_or_chain_to_pax() {
+        // `or` with two contains() arms (real corpus shape).
+        let v = serde_json::json!({
+            "or": [
+                { "contains": ["@variables('s')", "Foo"] },
+                { "contains": ["@variables('s')", "Bar"] }
+            ]
+        });
+        let out = cond(v, &["s"]);
+        assert_eq!(
+            out.as_deref(),
+            Some("(contains(s, \"Foo\") || contains(s, \"Bar\"))")
+        );
+    }
+
+    #[test]
+    fn condition_object_unknown_op_falls_back() {
+        let v = serde_json::json!({"weirdOp": [1, 2]});
+        assert!(cond(v, &[]).is_none());
+    }
+
+    #[test]
+    fn condition_object_undeclared_var_falls_back() {
+        let v = serde_json::json!({"equals": ["@variables('missing')", true]});
+        assert!(cond(v, &[]).is_none());
+    }
+
+    #[test]
+    fn condition_object_two_keys_falls_back() {
+        // PA's condition objects are always single-key. A two-key map is
+        // either malformed or something we don't recognize — bail.
+        let v = serde_json::json!({"and": [], "or": []});
+        assert!(cond(v, &[]).is_none());
     }
 }

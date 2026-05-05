@@ -26,6 +26,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Two-space indent, applied per nesting level when rendering pax source for
+/// a container body. Keeping it as a constant rather than inlining lets
+/// future-us swap to tabs or four-space without spelunking through formatters.
+const PAX_INDENT_UNIT: &str = "  ";
+
 /// Files written and warnings collected during a successful decode. The
 /// caller (typically the paxc binary) prints `warnings` to stderr.
 #[derive(Debug, Clone)]
@@ -144,83 +149,38 @@ pub fn decode(input: &Value, basename: &str, out_dir: &Path) -> Result<DecodeRep
     }
 
     // 3. Actions: topo-sort, then native-decode-or-fallback per action.
+    // Containers (If/Foreach/Until/Switch/Scope) recurse into this same
+    // helper for their bodies. The helper writes any fallback pa/ files
+    // eagerly via the shared `DecodeCtx` and returns a vector of NativeStmts
+    // we then format into pax source with proper indentation.
     let empty_actions = Map::new();
     let actions = definition
         .get("actions")
         .and_then(Value::as_object)
         .unwrap_or(&empty_actions);
-    let order = topo_sort_actions(actions)?;
 
     let mut name_map: HashMap<String, String> = HashMap::new();
     let mut used_names: HashSet<String> = HashSet::new();
-    let mut pax_lines: Vec<String> = Vec::new();
-    // Pax bindings (vars + lets) declared natively so far. Subsequent
-    // assigns can only natively-lower if their target is in this set —
-    // otherwise the emitted pax has an undeclared reference and won't
-    // compile. New lets/vars also collide if the name is already here
-    // (pax shares one namespace across vars and lets).
-    let mut native_bindings: HashSet<String> = HashSet::new();
+    let mut pa_files_written: Vec<PathBuf> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
-    for original_key in &order {
-        let action = &actions[original_key];
-        let action_obj = action.as_object().ok_or_else(|| {
-            DecodeError::BadShape(format!("action `{original_key}` is not an object"))
-        })?;
-        let action_type = action_obj
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-
-        let handler_edge = is_handler_runafter(action_obj.get("runAfter"));
-        if handler_edge {
-            report.warnings.push(format!(
-                "note: action `{original_key}` has handler-style runAfter; falling back to pa <Name> (slice 44a does not yet decode on-handlers)"
-            ));
-        }
-
-        let native = if handler_edge {
-            None
-        } else {
-            let ctx = paexpr::RenderCtx {
-                bindings: &native_bindings,
-            };
-            try_decode_native(original_key, &action_type, action_obj, &ctx)
-                .filter(|stmt| native_target_available(stmt, &native_bindings))
+    let stmts = {
+        let mut ctx = DecodeCtx {
+            pa_dir: &pa_dir,
+            used_names: &mut used_names,
+            name_map: &mut name_map,
+            pa_files_written: &mut pa_files_written,
+            warnings: &mut warnings,
         };
+        decode_actions_block(actions, &HashSet::new(), &HashMap::new(), &mut ctx)?
+    };
 
-        if let Some(stmt) = native {
-            // Track new bindings so downstream actions can resolve them.
-            match &stmt {
-                NativeStmt::VarInit { name, .. } | NativeStmt::Let { name, .. } => {
-                    native_bindings.insert(name.clone());
-                }
-                NativeStmt::Assign { .. } => {}
-            }
-            pax_lines.push(format_native_stmt(&stmt));
-            // Natively-lowered actions don't need pa/ files.
-        } else {
-            // Fall back to `pa <Name>`. Normalize the key, write the body
-            // file verbatim, emit the pa statement.
-            let normalized = normalize_action_key(original_key, &mut used_names);
-            if normalized != *original_key {
-                name_map.insert(original_key.clone(), normalized.clone());
-            }
-            let path = pa_dir.join(format!("{normalized}.json"));
-            write_json(&path, action)?;
-            report.pa_files_written.push(path);
-            if !handler_edge {
-                report.warnings.push(format!(
-                    "note: action `{original_key}` (type {}) not yet decoded natively; emitted as pa block",
-                    if action_type.is_empty() {
-                        "<unknown>"
-                    } else {
-                        action_type.as_str()
-                    }
-                ));
-            }
-            pax_lines.push(format!("pa {normalized}"));
-        }
+    report.pa_files_written.extend(pa_files_written);
+    report.warnings.extend(warnings);
+
+    let mut pax_lines: Vec<String> = Vec::new();
+    for stmt in &stmts {
+        pax_lines.push(format_native_stmt(stmt, 0));
     }
 
     // 4. flow.json with envelope metadata + name map.
@@ -376,13 +336,16 @@ fn is_handler_runafter(run_after: Option<&Value>) -> bool {
 }
 
 /// One pax statement we know how to emit natively. The `pa <Name>` fallback
-/// is the caller's escape hatch when `try_decode_native` returns None.
+/// is encoded as `NativeStmt::Pa` so containers can mix natively-decoded
+/// children with opaque-fallback children inside the same body.
 ///
-/// The `value` fields hold already-rendered pax source (a string), produced
-/// by the `paexpr` translator. Storing the rendered form lets the decoder
-/// stay agnostic about whether the source value was a literal, a single PA
-/// accessor, a synthesized binary op, or a templated string — any of those
-/// shapes round-trips through `format!` the same way.
+/// The `value` / `condition` / `collection` fields hold already-rendered pax
+/// source (a string), produced by the `paexpr` translator. Storing the
+/// rendered form lets the decoder stay agnostic about whether the source
+/// value was a literal, a single PA accessor, a synthesized binary op, or a
+/// templated string — any of those shapes round-trips through `format!` the
+/// same way. Container variants hold a recursive `Vec<NativeStmt>` for
+/// their body.
 #[derive(Debug, Clone)]
 enum NativeStmt {
     VarInit {
@@ -402,6 +365,53 @@ enum NativeStmt {
     /// only fires when the original PA key has the `Compose_<id>` shape with
     /// `<id>` being a valid pax identifier.
     Let { name: String, value: String },
+    /// Pax `if <cond> { ... } [else { ... }]`. `else_body` is empty for the
+    /// no-else form; PA's `else: { actions: {} }` and a missing `else` key
+    /// both decode to an empty vector here.
+    If {
+        condition: String,
+        then_body: Vec<NativeStmt>,
+        else_body: Vec<NativeStmt>,
+    },
+    /// Pax `foreach <iter> in <collection> { ... }`. `iter` is the pax
+    /// iterator name in scope inside the body (derived from the PA action
+    /// key). Body code referencing `items('<pa_action_key>')` resolves to
+    /// this iterator name via the `iterators` field of `RenderCtx`.
+    Foreach {
+        iter: String,
+        collection: String,
+        body: Vec<NativeStmt>,
+    },
+    /// Pax `until <cond> [max N] [timeout "..."] { ... }`. PA's defaults
+    /// (`count: 60`, `timeout: "PT1H"`) decode to `None`, so re-emit
+    /// reproduces the same defaults.
+    Until {
+        condition: String,
+        max: Option<u32>,
+        timeout: Option<String>,
+        body: Vec<NativeStmt>,
+    },
+    /// Pax `switch <subject> { case <lit> { ... } default { ... } }`. Each
+    /// `cases` tuple holds the case-value pax source (a literal expression)
+    /// and the case body. `default` is `None` when PA's source omitted the
+    /// `default` block entirely; an explicit empty `default { }` decodes to
+    /// `Some(vec![])` so the source's intent round-trips.
+    Switch {
+        subject: String,
+        cases: Vec<(String, Vec<NativeStmt>)>,
+        default: Option<Vec<NativeStmt>>,
+    },
+    /// Pax `scope [<name>] { ... }`. Anonymous scope when `name` is None.
+    Scope {
+        name: Option<String>,
+        body: Vec<NativeStmt>,
+    },
+    /// Fallback: `pa <Name>` referencing a `pa/<Name>.json` file written
+    /// alongside. Used when an action type isn't natively decodable, OR
+    /// when a container's required structural piece (condition expression,
+    /// foreach collection, switch subject, etc.) doesn't render — the whole
+    /// container falls back as one opaque action.
+    Pa { name: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -443,12 +453,143 @@ impl PaxType {
     }
 }
 
+/// Mutable state threaded through every decode call: the shared `pa/`
+/// directory, the global used-names set (so fallback action keys are unique
+/// across the whole flow including nested fallbacks), the original→normalized
+/// name map, the list of files written to disk, and the warnings vec.
+///
+/// Per-scope state (bindings, iterators) is passed separately by value so
+/// nested scopes get clone-and-extend semantics — an inner `let` in an if
+/// branch doesn't leak to outer code, mirroring pax's own resolver scoping.
+struct DecodeCtx<'a> {
+    pa_dir: &'a Path,
+    used_names: &'a mut HashSet<String>,
+    name_map: &'a mut HashMap<String, String>,
+    pa_files_written: &'a mut Vec<PathBuf>,
+    warnings: &'a mut Vec<String>,
+}
+
+/// Decode a PA actions map (top-level or inside a container) into a vector
+/// of pax statements in source order. Recurses into container bodies via
+/// `try_decode_container`. Each child action either decodes natively or
+/// falls back to a `NativeStmt::Pa` (with its body written eagerly to
+/// `pa/<Name>.json`).
+///
+/// `bindings` and `iterators` describe the pax scope visible at this body's
+/// entry. The function clones them locally and extends as inner statements
+/// introduce new pax-side names (vars, lets, foreach iters), but the
+/// extended sets do NOT leak back to the caller — that's how pax's lexical
+/// scoping is preserved through the round-trip.
+fn decode_actions_block(
+    actions: &Map<String, Value>,
+    bindings: &HashSet<String>,
+    iterators: &HashMap<String, String>,
+    ctx: &mut DecodeCtx<'_>,
+) -> Result<Vec<NativeStmt>, DecodeError> {
+    let order = topo_sort_actions(actions)?;
+    let mut local_bindings = bindings.clone();
+    let local_iterators = iterators.clone();
+    let mut out: Vec<NativeStmt> = Vec::with_capacity(order.len());
+
+    for original_key in &order {
+        let action = &actions[original_key];
+        let action_obj = action.as_object().ok_or_else(|| {
+            DecodeError::BadShape(format!("action `{original_key}` is not an object"))
+        })?;
+        let action_type = action_obj
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        let handler_edge = is_handler_runafter(action_obj.get("runAfter"));
+        if handler_edge {
+            ctx.warnings.push(format!(
+                "note: action `{original_key}` has handler-style runAfter; falling back to pa <Name> (slice 44d does not yet decode on-handlers)"
+            ));
+        }
+
+        let stmt = if handler_edge {
+            None
+        } else {
+            let render_ctx = paexpr::RenderCtx::new(&local_bindings, &local_iterators);
+            match try_decode_native(original_key, &action_type, action_obj, &render_ctx) {
+                Some(s) if native_target_available(&s, &local_bindings) => Some(s),
+                _ => try_decode_container(
+                    original_key,
+                    &action_type,
+                    action_obj,
+                    &local_bindings,
+                    &local_iterators,
+                    ctx,
+                )?,
+            }
+        };
+
+        let resolved = match stmt {
+            Some(s) => {
+                track_new_binding(&s, &mut local_bindings);
+                s
+            }
+            None => {
+                if !handler_edge {
+                    ctx.warnings.push(format!(
+                        "note: action `{original_key}` (type {}) not yet decoded natively; emitted as pa block",
+                        if action_type.is_empty() {
+                            "<unknown>"
+                        } else {
+                            action_type.as_str()
+                        }
+                    ));
+                }
+                fallback_to_pa(original_key, action, ctx)?
+            }
+        };
+        out.push(resolved);
+    }
+
+    Ok(out)
+}
+
+/// Track new pax bindings introduced by a freshly-decoded statement. Vars
+/// and lets both go into the same set (pax shares one namespace).
+fn track_new_binding(stmt: &NativeStmt, bindings: &mut HashSet<String>) {
+    match stmt {
+        NativeStmt::VarInit { name, .. } | NativeStmt::Let { name, .. } => {
+            bindings.insert(name.clone());
+        }
+        _ => {}
+    }
+}
+
+/// Write the action's body verbatim to a `pa/<Name>.json` file (with a
+/// uniquified normalized name) and return a `NativeStmt::Pa` referring to it.
+fn fallback_to_pa(
+    original_key: &str,
+    action: &Value,
+    ctx: &mut DecodeCtx<'_>,
+) -> Result<NativeStmt, DecodeError> {
+    let normalized = normalize_action_key(original_key, ctx.used_names);
+    if normalized != *original_key {
+        ctx.name_map
+            .insert(original_key.to_string(), normalized.clone());
+    }
+    let path = ctx.pa_dir.join(format!("{normalized}.json"));
+    write_json(&path, action)?;
+    ctx.pa_files_written.push(path);
+    Ok(NativeStmt::Pa { name: normalized })
+}
+
 /// Returns Some(stmt) for action types we know how to natively lower. None
 /// forces fallback to `pa <Name>`. The `action_key` is needed for Compose
 /// because the let-binding name comes from the key suffix, not the inputs.
 /// The `ctx` is threaded into `paexpr::json_to_pax` so PA expression
 /// translation can resolve `variables('x')` / `outputs('Compose_y')` against
 /// the bindings already declared.
+///
+/// Container types (If/Foreach/Until/Switch/Scope) are NOT handled here —
+/// they go through `try_decode_container` which has the additional plumbing
+/// to recurse into child bodies and write any nested fallback files.
 fn try_decode_native(
     action_key: &str,
     action_type: &str,
@@ -491,6 +632,309 @@ fn try_decode_native(
     }
 }
 
+/// Container action types: If/Foreach/Until/Switch/Scope. Each recurses
+/// into child bodies via `decode_actions_block`. Returns Ok(None) when the
+/// container's required structural piece (condition, collection, subject,
+/// case literal) can't be rendered — the caller then falls back to
+/// `pa <Name>` for the whole container as one opaque action. Returns
+/// Ok(Some(stmt)) for natively decoded containers.
+fn try_decode_container(
+    action_key: &str,
+    action_type: &str,
+    action: &Map<String, Value>,
+    bindings: &HashSet<String>,
+    iterators: &HashMap<String, String>,
+    ctx: &mut DecodeCtx<'_>,
+) -> Result<Option<NativeStmt>, DecodeError> {
+    match action_type {
+        "Scope" => decode_scope(action_key, action, bindings, iterators, ctx),
+        "If" => decode_if(action, bindings, iterators, ctx),
+        "Foreach" => decode_foreach(action_key, action, bindings, iterators, ctx),
+        "Until" => decode_until(action, bindings, iterators, ctx),
+        "Switch" => decode_switch(action, bindings, iterators, ctx),
+        _ => Ok(None),
+    }
+}
+
+fn decode_scope(
+    action_key: &str,
+    action: &Map<String, Value>,
+    bindings: &HashSet<String>,
+    iterators: &HashMap<String, String>,
+    ctx: &mut DecodeCtx<'_>,
+) -> Result<Option<NativeStmt>, DecodeError> {
+    let empty = Map::new();
+    let inner = action
+        .get("actions")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let body = decode_actions_block(inner, bindings, iterators, ctx)?;
+    let name = scope_label(action_key);
+    Ok(Some(NativeStmt::Scope { name, body }))
+}
+
+/// Recover the optional pax label from a Scope action key. PA designer's
+/// default for an unnamed scope is the bare key `Scope` (or `Scope_2`,
+/// `Scope_3` for collisions); paxc's named scope uses `Scope_<label>`. We
+/// return None for the bare/auto-suffixed forms so the source reads as
+/// `scope { ... }`, and Some(label) for `Scope_<label>` where label is a
+/// valid pax identifier.
+fn scope_label(action_key: &str) -> Option<String> {
+    let suffix = action_key.strip_prefix("Scope_")?;
+    // Numeric-only suffix is paxc's auto-uniquify pattern (`Scope_2`,
+    // `Scope_3`); render as anonymous.
+    if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if !is_pax_identifier(suffix) {
+        return None;
+    }
+    Some(suffix.to_string())
+}
+
+fn decode_if(
+    action: &Map<String, Value>,
+    bindings: &HashSet<String>,
+    iterators: &HashMap<String, String>,
+    ctx: &mut DecodeCtx<'_>,
+) -> Result<Option<NativeStmt>, DecodeError> {
+    let render_ctx = paexpr::RenderCtx::new(bindings, iterators);
+    let Some(condition) = action
+        .get("expression")
+        .and_then(|v| paexpr::condition_value_to_pax(v, &render_ctx))
+    else {
+        return Ok(None);
+    };
+    let empty = Map::new();
+    let then_actions = action
+        .get("actions")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let else_actions = action
+        .get("else")
+        .and_then(|e| e.get("actions"))
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let then_body = decode_actions_block(then_actions, bindings, iterators, ctx)?;
+    let else_body = decode_actions_block(else_actions, bindings, iterators, ctx)?;
+    Ok(Some(NativeStmt::If {
+        condition,
+        then_body,
+        else_body,
+    }))
+}
+
+fn decode_foreach(
+    action_key: &str,
+    action: &Map<String, Value>,
+    bindings: &HashSet<String>,
+    iterators: &HashMap<String, String>,
+    ctx: &mut DecodeCtx<'_>,
+) -> Result<Option<NativeStmt>, DecodeError> {
+    let render_ctx = paexpr::RenderCtx::new(bindings, iterators);
+    let Some(collection) = action
+        .get("foreach")
+        .and_then(|v| paexpr::json_to_pax(v, &render_ctx))
+    else {
+        return Ok(None);
+    };
+    // Pick a pax-side iterator name from the PA action key. PA's items()
+    // calls inside the body reference the action key; mapping
+    // PA_action_key → pax_iter_name in the body's RenderCtx lets the
+    // translator resolve those calls.
+    let iter = foreach_iter_name(action_key, bindings, iterators);
+    let mut child_iterators = iterators.clone();
+    child_iterators.insert(action_key.to_string(), iter.clone());
+    let empty = Map::new();
+    let inner = action
+        .get("actions")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let body = decode_actions_block(inner, bindings, &child_iterators, ctx)?;
+    Ok(Some(NativeStmt::Foreach {
+        iter,
+        collection,
+        body,
+    }))
+}
+
+/// Derive a pax-side iterator name from a PA `Foreach` action key. We start
+/// with the normalized key, then suffix `_2`, `_3`, ... if it would shadow
+/// an outer binding or iterator, or collide with a pax keyword. The result
+/// is always a valid pax identifier.
+fn foreach_iter_name(
+    action_key: &str,
+    bindings: &HashSet<String>,
+    iterators: &HashMap<String, String>,
+) -> String {
+    let mut taken: HashSet<String> = HashSet::new();
+    let base = if is_pax_identifier(action_key) {
+        action_key.to_string()
+    } else {
+        let mut local_used = HashSet::new();
+        normalize_action_key(action_key, &mut local_used)
+    };
+    let mut candidate = base.clone();
+    let mut n = 2u32;
+    loop {
+        let collides = bindings.contains(&candidate)
+            || iterators.values().any(|v| v == &candidate)
+            || taken.contains(&candidate)
+            || PAX_RESERVED.contains(&candidate.as_str());
+        if !collides {
+            return candidate;
+        }
+        taken.insert(candidate.clone());
+        candidate = format!("{base}_{n}");
+        n += 1;
+    }
+}
+
+const PAX_RESERVED: &[&str] = &[
+    "var",
+    "let",
+    "if",
+    "else",
+    "foreach",
+    "in",
+    "until",
+    "pa",
+    "debug",
+    "terminate",
+    "switch",
+    "case",
+    "default",
+    "scope",
+    "on",
+    "null",
+    "true",
+    "false",
+    "int",
+    "float",
+    "string",
+    "bool",
+    "array",
+    "object",
+    "max",
+    "timeout",
+];
+
+fn is_pax_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn decode_until(
+    action: &Map<String, Value>,
+    bindings: &HashSet<String>,
+    iterators: &HashMap<String, String>,
+    ctx: &mut DecodeCtx<'_>,
+) -> Result<Option<NativeStmt>, DecodeError> {
+    let render_ctx = paexpr::RenderCtx::new(bindings, iterators);
+    let Some(condition) = action
+        .get("expression")
+        .and_then(|v| paexpr::condition_value_to_pax(v, &render_ctx))
+    else {
+        return Ok(None);
+    };
+    // PA's defaults: count=60, timeout="PT1H". Decode to None so the pax
+    // source omits `max` / `timeout` and the encoder reapplies the defaults
+    // identically.
+    let limit = action.get("limit").and_then(Value::as_object);
+    let max = limit
+        .and_then(|l| l.get("count"))
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| n != 60);
+    let timeout = limit
+        .and_then(|l| l.get("timeout"))
+        .and_then(Value::as_str)
+        .filter(|&t| t != "PT1H")
+        .map(str::to_string);
+    let empty = Map::new();
+    let inner = action
+        .get("actions")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let body = decode_actions_block(inner, bindings, iterators, ctx)?;
+    Ok(Some(NativeStmt::Until {
+        condition,
+        max,
+        timeout,
+        body,
+    }))
+}
+
+fn decode_switch(
+    action: &Map<String, Value>,
+    bindings: &HashSet<String>,
+    iterators: &HashMap<String, String>,
+    ctx: &mut DecodeCtx<'_>,
+) -> Result<Option<NativeStmt>, DecodeError> {
+    let render_ctx = paexpr::RenderCtx::new(bindings, iterators);
+    let Some(subject) = action
+        .get("expression")
+        .and_then(|v| paexpr::json_to_pax(v, &render_ctx))
+    else {
+        return Ok(None);
+    };
+    let empty_map = Map::new();
+    let cases_map = action
+        .get("cases")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty_map);
+    let mut cases: Vec<(String, Vec<NativeStmt>)> = Vec::with_capacity(cases_map.len());
+    for case_body in cases_map.values() {
+        let case_obj = case_body
+            .as_object()
+            .ok_or_else(|| DecodeError::BadShape("Switch case is not an object".to_string()))?;
+        let Some(case_value) = case_obj.get("case").and_then(switch_case_literal) else {
+            return Ok(None);
+        };
+        let inner = case_obj
+            .get("actions")
+            .and_then(Value::as_object)
+            .unwrap_or(&empty_map);
+        let body = decode_actions_block(inner, bindings, iterators, ctx)?;
+        cases.push((case_value, body));
+    }
+    let default = match action.get("default").and_then(Value::as_object) {
+        Some(d) => {
+            let inner = d
+                .get("actions")
+                .and_then(Value::as_object)
+                .unwrap_or(&empty_map);
+            Some(decode_actions_block(inner, bindings, iterators, ctx)?)
+        }
+        None => None,
+    };
+    Ok(Some(NativeStmt::Switch {
+        subject,
+        cases,
+        default,
+    }))
+}
+
+/// Render a case-value JSON literal as pax source. PA's Switch only allows
+/// scalar literals here (string / int / bool / float), and pax mirrors that
+/// constraint via `SwitchCase::value: Literal`. Anything else falls back.
+fn switch_case_literal(v: &Value) -> Option<String> {
+    paexpr::json_to_pa_lit(v).and_then(|lit| {
+        // EmptyArray / EmptyObject would render but PA's Switch wouldn't
+        // accept them as case values. Reject defensively.
+        match lit {
+            paexpr::PaLit::EmptyArray | paexpr::PaLit::EmptyObject | paexpr::PaLit::Null => None,
+            _ => paexpr::render_pa_lit(&lit),
+        }
+    })
+}
+
 /// Recover the pax let-binding name from a `Compose_<id>` action key. Returns
 /// None for any key that doesn't have the `Compose_` prefix or whose suffix
 /// isn't a valid pax identifier (`[A-Za-z_][A-Za-z0-9_]*`).
@@ -520,6 +964,15 @@ fn native_target_available(stmt: &NativeStmt, declared: &HashSet<String>) -> boo
     match stmt {
         NativeStmt::VarInit { name, .. } | NativeStmt::Let { name, .. } => !declared.contains(name),
         NativeStmt::Assign { name, .. } => declared.contains(name),
+        // Container statements always pass this gate — their internals are
+        // gated separately by the recursive decode in their bodies. The
+        // `Pa` fallback is unconditional (the body's already on disk).
+        NativeStmt::If { .. }
+        | NativeStmt::Foreach { .. }
+        | NativeStmt::Until { .. }
+        | NativeStmt::Switch { .. }
+        | NativeStmt::Scope { .. }
+        | NativeStmt::Pa { .. } => true,
     }
 }
 
@@ -534,14 +987,101 @@ fn decode_simple_assign(
     Some(NativeStmt::Assign { name, op, value })
 }
 
-fn format_native_stmt(stmt: &NativeStmt) -> String {
+/// Render a single statement to pax source at the given indent depth. The
+/// returned string has no leading indent on the first line — the caller
+/// glues it after its own prefix — but inner lines (container body lines)
+/// carry the appropriate indentation.
+fn format_native_stmt(stmt: &NativeStmt, depth: usize) -> String {
+    let indent = PAX_INDENT_UNIT.repeat(depth);
     match stmt {
         NativeStmt::VarInit { name, ty, value } => match value {
-            Some(v) => format!("var {name}: {} = {v}", ty.keyword()),
-            None => format!("var {name}: {}", ty.keyword()),
+            Some(v) => format!("{indent}var {name}: {} = {v}", ty.keyword()),
+            None => format!("{indent}var {name}: {}", ty.keyword()),
         },
-        NativeStmt::Assign { name, op, value } => format!("{name} {op} {value}"),
-        NativeStmt::Let { name, value } => format!("let {name} = {value}"),
+        NativeStmt::Assign { name, op, value } => format!("{indent}{name} {op} {value}"),
+        NativeStmt::Let { name, value } => format!("{indent}let {name} = {value}"),
+        NativeStmt::Pa { name } => format!("{indent}pa {name}"),
+        NativeStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            let mut s = format!("{indent}if {condition} {{\n");
+            push_body(&mut s, then_body, depth + 1);
+            if else_body.is_empty() {
+                s.push_str(&format!("{indent}}}"));
+            } else {
+                s.push_str(&format!("{indent}}} else {{\n"));
+                push_body(&mut s, else_body, depth + 1);
+                s.push_str(&format!("{indent}}}"));
+            }
+            s
+        }
+        NativeStmt::Foreach {
+            iter,
+            collection,
+            body,
+        } => {
+            let mut s = format!("{indent}foreach {iter} in {collection} {{\n");
+            push_body(&mut s, body, depth + 1);
+            s.push_str(&format!("{indent}}}"));
+            s
+        }
+        NativeStmt::Until {
+            condition,
+            max,
+            timeout,
+            body,
+        } => {
+            let mut header = format!("{indent}until {condition}");
+            if let Some(n) = max {
+                header.push_str(&format!(" max {n}"));
+            }
+            if let Some(t) = timeout {
+                header.push_str(&format!(" timeout \"{t}\""));
+            }
+            let mut s = format!("{header} {{\n");
+            push_body(&mut s, body, depth + 1);
+            s.push_str(&format!("{indent}}}"));
+            s
+        }
+        NativeStmt::Switch {
+            subject,
+            cases,
+            default,
+        } => {
+            let mut s = format!("{indent}switch {subject} {{\n");
+            let inner_indent = PAX_INDENT_UNIT.repeat(depth + 1);
+            for (case_value, body) in cases {
+                s.push_str(&format!("{inner_indent}case {case_value} {{\n"));
+                push_body(&mut s, body, depth + 2);
+                s.push_str(&format!("{inner_indent}}}\n"));
+            }
+            if let Some(body) = default {
+                s.push_str(&format!("{inner_indent}default {{\n"));
+                push_body(&mut s, body, depth + 2);
+                s.push_str(&format!("{inner_indent}}}\n"));
+            }
+            s.push_str(&format!("{indent}}}"));
+            s
+        }
+        NativeStmt::Scope { name, body } => {
+            let header = match name {
+                Some(n) => format!("{indent}scope {n} {{"),
+                None => format!("{indent}scope {{"),
+            };
+            let mut s = format!("{header}\n");
+            push_body(&mut s, body, depth + 1);
+            s.push_str(&format!("{indent}}}"));
+            s
+        }
+    }
+}
+
+fn push_body(out: &mut String, body: &[NativeStmt], depth: usize) {
+    for stmt in body {
+        out.push_str(&format_native_stmt(stmt, depth));
+        out.push('\n');
     }
 }
 
@@ -727,9 +1267,8 @@ mod tests {
     /// against declared bindings use `try_decode_with_bindings` instead.
     fn try_decode(action: &Value) -> Option<NativeStmt> {
         let bindings: HashSet<String> = HashSet::new();
-        let ctx = paexpr::RenderCtx {
-            bindings: &bindings,
-        };
+        let iters = HashMap::new();
+        let ctx = paexpr::RenderCtx::new(&bindings, &iters);
         try_decode_native(
             "TestKey",
             action["type"].as_str().unwrap(),
@@ -740,9 +1279,8 @@ mod tests {
 
     fn try_decode_with_bindings(action: &Value, names: &[&str]) -> Option<NativeStmt> {
         let bindings: HashSet<String> = names.iter().map(|s| s.to_string()).collect();
-        let ctx = paexpr::RenderCtx {
-            bindings: &bindings,
-        };
+        let iters = HashMap::new();
+        let ctx = paexpr::RenderCtx::new(&bindings, &iters);
         try_decode_native(
             "TestKey",
             action["type"].as_str().unwrap(),
@@ -760,7 +1298,7 @@ mod tests {
             }
         });
         let stmt = try_decode(&action).unwrap();
-        assert_eq!(format_native_stmt(&stmt), "var counter: int = 5");
+        assert_eq!(format_native_stmt(&stmt, 0), "var counter: int = 5");
     }
 
     #[test]
@@ -774,7 +1312,7 @@ mod tests {
             }
         });
         let stmt = try_decode(&action).unwrap();
-        assert_eq!(format_native_stmt(&stmt), "var todo: string");
+        assert_eq!(format_native_stmt(&stmt, 0), "var todo: string");
     }
 
     #[test]
@@ -786,7 +1324,7 @@ mod tests {
             }
         });
         let stmt = try_decode(&action).unwrap();
-        assert_eq!(format_native_stmt(&stmt), "var todo: string");
+        assert_eq!(format_native_stmt(&stmt, 0), "var todo: string");
     }
 
     #[test]
@@ -826,7 +1364,7 @@ mod tests {
         ];
         for (action, expected) in cases {
             let stmt = try_decode(&action).unwrap_or_else(|| panic!("decode failed for: {action}"));
-            assert_eq!(format_native_stmt(&stmt), expected);
+            assert_eq!(format_native_stmt(&stmt, 0), expected);
         }
     }
 
@@ -875,9 +1413,10 @@ mod tests {
     /// inline.
     fn try_decode_compose(action_key: &str, action: &Value) -> Option<NativeStmt> {
         let bindings: HashSet<String> = HashSet::new();
-        let ctx = paexpr::RenderCtx {
-            bindings: &bindings,
-        };
+
+        let iters = HashMap::new();
+
+        let ctx = paexpr::RenderCtx::new(&bindings, &iters);
         try_decode_native(action_key, "Compose", action.as_object().unwrap(), &ctx)
     }
 
@@ -885,9 +1424,10 @@ mod tests {
     fn native_compose_with_string_literal_lowers_to_let() {
         let action = json!({"type": "Compose", "inputs": "hello"});
         let bindings: HashSet<String> = HashSet::new();
-        let ctx = paexpr::RenderCtx {
-            bindings: &bindings,
-        };
+
+        let iters = HashMap::new();
+
+        let ctx = paexpr::RenderCtx::new(&bindings, &iters);
         let stmt = try_decode_native(
             "Compose_greeting",
             "Compose",
@@ -895,16 +1435,17 @@ mod tests {
             &ctx,
         )
         .unwrap();
-        assert_eq!(format_native_stmt(&stmt), "let greeting = \"hello\"");
+        assert_eq!(format_native_stmt(&stmt, 0), "let greeting = \"hello\"");
     }
 
     #[test]
     fn native_compose_with_int_literal_lowers_to_let() {
         let action = json!({"type": "Compose", "inputs": 42});
         let bindings: HashSet<String> = HashSet::new();
-        let ctx = paexpr::RenderCtx {
-            bindings: &bindings,
-        };
+
+        let iters = HashMap::new();
+
+        let ctx = paexpr::RenderCtx::new(&bindings, &iters);
         let stmt = try_decode_native(
             "Compose_answer",
             "Compose",
@@ -912,7 +1453,7 @@ mod tests {
             &ctx,
         )
         .unwrap();
-        assert_eq!(format_native_stmt(&stmt), "let answer = 42");
+        assert_eq!(format_native_stmt(&stmt, 0), "let answer = 42");
     }
 
     #[test]
@@ -929,9 +1470,10 @@ mod tests {
         // recoverable pax name suffix.
         let action = json!({"type": "Compose", "inputs": "ok"});
         let bindings: HashSet<String> = HashSet::new();
-        let ctx = paexpr::RenderCtx {
-            bindings: &bindings,
-        };
+
+        let iters = HashMap::new();
+
+        let ctx = paexpr::RenderCtx::new(&bindings, &iters);
         assert!(
             try_decode_native("Compose", "Compose", action.as_object().unwrap(), &ctx).is_none()
         );
@@ -942,9 +1484,10 @@ mod tests {
         // Non-empty arrays/objects can't be rendered in pax source.
         let action = json!({"type": "Compose", "inputs": [1, 2, 3]});
         let bindings: HashSet<String> = HashSet::new();
-        let ctx = paexpr::RenderCtx {
-            bindings: &bindings,
-        };
+
+        let iters = HashMap::new();
+
+        let ctx = paexpr::RenderCtx::new(&bindings, &iters);
         assert!(
             try_decode_native("Compose_a", "Compose", action.as_object().unwrap(), &ctx).is_none()
         );
@@ -1288,7 +1831,7 @@ mod tests {
             }
         });
         let stmt = try_decode_with_bindings(&action, &["x"]).unwrap();
-        assert_eq!(format_native_stmt(&stmt), "var y: int = x");
+        assert_eq!(format_native_stmt(&stmt, 0), "var y: int = x");
     }
 
     #[test]
@@ -1311,7 +1854,7 @@ mod tests {
             "inputs": { "name": "x", "value": "@add(variables('x'), 5)" }
         });
         let stmt = try_decode_with_bindings(&action, &["x"]).unwrap();
-        assert_eq!(format_native_stmt(&stmt), "x = (x + 5)");
+        assert_eq!(format_native_stmt(&stmt, 0), "x = (x + 5)");
     }
 
     #[test]
@@ -1321,7 +1864,7 @@ mod tests {
             "inputs": { "name": "n", "value": "@variables('m')" }
         });
         let stmt = try_decode_with_bindings(&action, &["n", "m"]).unwrap();
-        assert_eq!(format_native_stmt(&stmt), "n += m");
+        assert_eq!(format_native_stmt(&stmt, 0), "n += m");
     }
 
     #[test]
@@ -1332,7 +1875,7 @@ mod tests {
         });
         let stmt = try_decode_with_bindings(&action, &["msg", "name"]).unwrap();
         assert_eq!(
-            format_native_stmt(&stmt),
+            format_native_stmt(&stmt, 0),
             "msg &= (\"Hello \" & name & \"!\")"
         );
     }
@@ -1346,9 +1889,10 @@ mod tests {
             "inputs": "@add(variables('a'), variables('b'))"
         });
         let bindings: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
-        let ctx = paexpr::RenderCtx {
-            bindings: &bindings,
-        };
+
+        let iters = HashMap::new();
+
+        let ctx = paexpr::RenderCtx::new(&bindings, &iters);
         let stmt = try_decode_native(
             "Compose_total",
             "Compose",
@@ -1356,7 +1900,7 @@ mod tests {
             &ctx,
         )
         .unwrap();
-        assert_eq!(format_native_stmt(&stmt), "let total = (a + b)");
+        assert_eq!(format_native_stmt(&stmt, 0), "let total = (a + b)");
     }
 
     #[test]
@@ -1459,5 +2003,359 @@ mod tests {
         let pax = read(&report.pax_path);
         assert!(pax.contains("pa Initialize_data"), "pax was: {pax}");
         assert!(dir.join("pa/Initialize_data.json").exists());
+    }
+
+    // ---------- 44d: container decoding ----------
+
+    #[test]
+    fn decode_anonymous_scope_lowers_natively() {
+        let input = json!({
+            "properties": {
+                "displayName": "Scope Native",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Scope": {
+                            "type": "Scope",
+                            "runAfter": {},
+                            "actions": {
+                                "Inner": {
+                                    "type": "OpenApiConnection",
+                                    "runAfter": {},
+                                    "inputs": {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("scope_native");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(
+            pax.contains("scope {\n  pa Inner\n}"),
+            "expected nested anonymous scope; pax was: {pax}"
+        );
+        // The Scope itself was natively lowered, so no pa/Scope.json file.
+        assert!(!dir.join("pa/Scope.json").exists());
+        // Inner action fell back, so it gets a pa/ file.
+        assert!(dir.join("pa/Inner.json").exists());
+    }
+
+    #[test]
+    fn decode_named_scope_recovers_label() {
+        let input = json!({
+            "properties": {
+                "displayName": "X",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Scope_try_work": {
+                            "type": "Scope",
+                            "runAfter": {},
+                            "actions": {}
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("scope_named");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(pax.contains("scope try_work {"), "pax was: {pax}");
+    }
+
+    #[test]
+    fn decode_if_with_object_condition_natively_lowers() {
+        // PA designer's exported If condition is the structured-object form:
+        //   {"and": [{"equals": ["@variables('approved')", true]}]}
+        // The decoder routes it through condition_value_to_pax which builds
+        // a `PaExpr::Call` tree, then renders to pax source. Single-arg
+        // `and` reads `and((expr))`; it compiles via the generic-call path.
+        let input = json!({
+            "properties": {
+                "displayName": "If Object",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Initialize_approved": {
+                            "type": "InitializeVariable",
+                            "runAfter": {},
+                            "inputs": { "variables": [{
+                                "name": "approved",
+                                "type": "Boolean",
+                                "value": false
+                            }]}
+                        },
+                        "If_check": {
+                            "type": "If",
+                            "runAfter": { "Initialize_approved": ["Succeeded"] },
+                            "expression": {
+                                "and": [{ "equals": ["@variables('approved')", true] }]
+                            },
+                            "actions": {},
+                            "else": { "actions": {} }
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("if_object");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(pax.contains("var approved: bool = false"), "pax was: {pax}");
+        assert!(
+            pax.contains("if and((approved == true)) {"),
+            "expected natively-decoded If header; pax was: {pax}"
+        );
+        // No pa/If_check.json because the If decoded natively.
+        assert!(!dir.join("pa/If_check.json").exists());
+    }
+
+    #[test]
+    fn decode_if_with_unresolvable_condition_falls_back() {
+        // The condition references body() of a connector — no native pax
+        // form yet, so the whole If falls back as one opaque pa block.
+        let input = json!({
+            "properties": {
+                "displayName": "X",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "If_complex": {
+                            "type": "If",
+                            "runAfter": {},
+                            "expression": {
+                                "equals": ["@body('Get_response')?['body/field']", "x"]
+                            },
+                            "actions": {
+                                "Inner": { "type": "OpenApiConnection", "runAfter": {}, "inputs": {} }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("if_fallback");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(pax.contains("pa If_complex"), "pax was: {pax}");
+        // The whole container is opaque; the inner action's pa/ file is
+        // NOT separately written — it lives inside the parent's body file.
+        assert!(dir.join("pa/If_complex.json").exists());
+        assert!(!dir.join("pa/Inner.json").exists());
+    }
+
+    #[test]
+    fn decode_foreach_with_compose_collection_translates_items() {
+        // Compose_things lets us refer to its outputs natively. A foreach
+        // over `outputs('Compose_things')` decodes to `foreach iter in things`,
+        // and `items('For_each')?['name']` inside the body lowers to `For_each.name`
+        // because the iterator name = action key by default.
+        let input = json!({
+            "properties": {
+                "displayName": "Foreach Native",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Compose_things": {
+                            "type": "Compose",
+                            "runAfter": {},
+                            "inputs": "list_placeholder"
+                        },
+                        "For_each": {
+                            "type": "Foreach",
+                            "runAfter": { "Compose_things": ["Succeeded"] },
+                            "foreach": "@outputs('Compose_things')",
+                            "actions": {
+                                "Inner": {
+                                    "type": "OpenApiConnection",
+                                    "runAfter": {},
+                                    "inputs": {
+                                        "value": "@items('For_each')?['name']"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("foreach_native");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(
+            pax.contains("foreach For_each in things {"),
+            "expected natively-decoded foreach; pax was: {pax}"
+        );
+        // Inner action falls back (OpenApiConnection isn't natively lowered),
+        // but its pa/ file's `items('For_each')` reference will be preserved
+        // on round-trip because the inner body is byte-equal to original.
+        assert!(dir.join("pa/Inner.json").exists());
+    }
+
+    #[test]
+    fn decode_until_with_pa_defaults_omits_max_and_timeout() {
+        let input = json!({
+            "properties": {
+                "displayName": "X",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Initialize_done": {
+                            "type": "InitializeVariable",
+                            "runAfter": {},
+                            "inputs": { "variables": [{
+                                "name": "done",
+                                "type": "Boolean",
+                                "value": false
+                            }]}
+                        },
+                        "Until_done": {
+                            "type": "Until",
+                            "runAfter": { "Initialize_done": ["Succeeded"] },
+                            "expression": "@equals(variables('done'), true)",
+                            "limit": { "count": 60, "timeout": "PT1H" },
+                            "actions": {}
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("until_defaults");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        // Default count/timeout decode to None → omitted in pax source.
+        assert!(
+            pax.contains("until (done == true) {"),
+            "expected bare until without max/timeout; pax was: {pax}"
+        );
+        assert!(!pax.contains("max"), "max should be omitted for default 60");
+        assert!(
+            !pax.contains("timeout"),
+            "timeout should be omitted for default PT1H"
+        );
+    }
+
+    #[test]
+    fn decode_until_with_custom_limits_renders_max_and_timeout() {
+        let input = json!({
+            "properties": {
+                "displayName": "X",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Initialize_done": {
+                            "type": "InitializeVariable",
+                            "runAfter": {},
+                            "inputs": { "variables": [{
+                                "name": "done",
+                                "type": "Boolean",
+                                "value": false
+                            }]}
+                        },
+                        "Until_done": {
+                            "type": "Until",
+                            "runAfter": { "Initialize_done": ["Succeeded"] },
+                            "expression": "@equals(variables('done'), true)",
+                            "limit": { "count": 5, "timeout": "PT30M" },
+                            "actions": {}
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("until_custom");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(
+            pax.contains("until (done == true) max 5 timeout \"PT30M\" {"),
+            "pax was: {pax}"
+        );
+    }
+
+    #[test]
+    fn decode_switch_with_string_cases_lowers_natively() {
+        let input = json!({
+            "properties": {
+                "displayName": "X",
+                "definition": {
+                    "triggers": { "manual": { "type": "Request", "kind": "Button", "inputs": {} } },
+                    "actions": {
+                        "Initialize_state": {
+                            "type": "InitializeVariable",
+                            "runAfter": {},
+                            "inputs": { "variables": [{
+                                "name": "state",
+                                "type": "String",
+                                "value": "ready"
+                            }]}
+                        },
+                        "Switch_state": {
+                            "type": "Switch",
+                            "runAfter": { "Initialize_state": ["Succeeded"] },
+                            "expression": "@variables('state')",
+                            "cases": {
+                                "Case": { "case": "ready", "actions": {} },
+                                "Case_2": { "case": "done", "actions": {} }
+                            },
+                            "default": { "actions": {} }
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tmp_dir("switch_native");
+        let report = decode(&input, "x", &dir).unwrap();
+        let pax = read(&report.pax_path);
+        assert!(pax.contains("switch state {"), "pax was: {pax}");
+        assert!(pax.contains("case \"ready\" {"), "pax was: {pax}");
+        assert!(pax.contains("case \"done\" {"), "pax was: {pax}");
+        assert!(pax.contains("default {"), "pax was: {pax}");
+    }
+
+    #[test]
+    fn decode_container_renames_iter_when_action_key_collides_with_pax_keyword() {
+        // PA action keys can be anything; if a Foreach happened to be keyed
+        // `if` (a pax reserved word), we'd need to pick a different iter
+        // name. Defensive: foreach_iter_name suffixes _2 to dodge keywords.
+        let bindings = HashSet::new();
+        let iters = HashMap::new();
+        let name = foreach_iter_name("if", &bindings, &iters);
+        assert_eq!(name, "if_2");
+    }
+
+    #[test]
+    fn decode_container_renames_iter_to_dodge_outer_binding() {
+        let mut bindings = HashSet::new();
+        bindings.insert("For_each".to_string());
+        let iters = HashMap::new();
+        let name = foreach_iter_name("For_each", &bindings, &iters);
+        assert_eq!(name, "For_each_2");
+    }
+
+    #[test]
+    fn decode_container_renames_iter_normalizes_invalid_action_key() {
+        // PA action keys with parens / spaces normalize on the way in. The
+        // iter name takes the normalized form.
+        let bindings = HashSet::new();
+        let iters = HashMap::new();
+        let name = foreach_iter_name("Apply to each (1)", &bindings, &iters);
+        assert_eq!(name, "Apply_to_each_1");
+    }
+
+    #[test]
+    fn decode_scope_label_recognizes_paxc_auto_suffix() {
+        // `Scope_2` is paxc's auto-uniquify shape; render as anonymous so
+        // the source reads `scope { ... }` without a useless numeric label.
+        assert_eq!(scope_label("Scope_2"), None);
+        assert_eq!(scope_label("Scope_3"), None);
+        // A real label survives.
+        assert_eq!(scope_label("Scope_try_work"), Some("try_work".to_string()));
+        // Bare `Scope` has no underscore → None.
+        assert_eq!(scope_label("Scope"), None);
+        // Non-pax-identifier labels fall back to anonymous.
+        assert_eq!(scope_label("Scope_my-label"), None);
     }
 }

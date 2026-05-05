@@ -94,7 +94,19 @@ where
             field,
         });
 
-        let atom = literal.clone().map(Expr::Literal).or(ref_path).boxed();
+        // Parenthesized subexpression. Lets the source disambiguate
+        // precedence (`!(a == b)`, `(a + b) * c`) and lets the round-trip
+        // decoder emit defensive parens without losing reparseability.
+        let paren_expr = expr
+            .clone()
+            .delimited_by(just(Token::LParen), just(Token::RParen));
+
+        let atom = literal
+            .clone()
+            .map(Expr::Literal)
+            .or(paren_expr)
+            .or(ref_path)
+            .boxed();
 
         let unary_op = select! {
             Token::Bang => UnaryOp::Not,
