@@ -133,7 +133,11 @@ fn emit_action(action: &ResolvedAction) -> Value {
             // Filtered out in `build_actions_map` before reaching here.
             unreachable!("debug action reached emitter");
         }
-        ActionKind::Terminate { status, message } => emit_terminate(*status, message.as_ref()),
+        ActionKind::Terminate {
+            status,
+            message,
+            code,
+        } => emit_terminate(*status, message.as_ref(), code.as_ref()),
         ActionKind::Switch {
             subject,
             cases,
@@ -226,20 +230,27 @@ fn emit_switch(
     Value::Object(out)
 }
 
-fn emit_terminate(status: TerminateStatus, message: Option<&Expr>) -> Value {
+fn emit_terminate(
+    status: TerminateStatus,
+    message: Option<&Expr>,
+    code: Option<&Expr>,
+) -> Value {
     let mut inputs = Map::new();
     inputs.insert(
         "runStatus".to_string(),
         Value::String(status.as_pa_str().to_string()),
     );
-    if let Some(msg) = message {
-        // `expr_to_json` emits literal strings as plain JSON and expressions
-        // as the `@{...}` interpolation form -- both valid for PA's
-        // `runError.message` field.
-        inputs.insert(
-            "runError".to_string(),
-            json!({ "message": expr_to_json(msg) }),
-        );
+    // PA's `runError` keeps a fixed `code` then `message` order in real
+    // exports; preserve it so decode/re-encode round-trips byte-stable.
+    if message.is_some() || code.is_some() {
+        let mut run_error = Map::new();
+        if let Some(c) = code {
+            run_error.insert("code".to_string(), expr_to_json(c));
+        }
+        if let Some(msg) = message {
+            run_error.insert("message".to_string(), expr_to_json(msg));
+        }
+        inputs.insert("runError".to_string(), Value::Object(run_error));
     }
     json!({
         "type": action::TERMINATE,
@@ -1203,6 +1214,33 @@ msg &= "!""#,
         let action = &out["definition"]["actions"]["Terminate"];
         let msg = action["inputs"]["runError"]["message"].as_str().unwrap();
         assert_eq!(msg, "failed at @{variables('step')}");
+    }
+
+    #[test]
+    fn terminate_failed_with_message_and_code_emits_both_fields() {
+        // PA exports keep `code` before `message` in `runError`. paxc
+        // matches that order so decode/re-encode round-trips byte-stable.
+        let out = compile(r#"terminate failed "No title" code "Invalid item""#);
+        let action = &out["definition"]["actions"]["Terminate"];
+        let run_error = &action["inputs"]["runError"];
+        assert_eq!(run_error["code"], "Invalid item");
+        assert_eq!(run_error["message"], "No title");
+        let keys: Vec<&str> = run_error
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, vec!["code", "message"]);
+    }
+
+    #[test]
+    fn terminate_failed_with_code_only_emits_code_no_message() {
+        let out = compile(r#"terminate failed code "X""#);
+        let action = &out["definition"]["actions"]["Terminate"];
+        let run_error = &action["inputs"]["runError"];
+        assert_eq!(run_error["code"], "X");
+        assert!(run_error.get("message").is_none());
     }
 
     #[test]

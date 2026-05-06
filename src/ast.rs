@@ -83,12 +83,15 @@ pub enum Stmt {
     /// paxr evaluates them and prints `debug: <source>=value at line X`. The
     /// span covers the whole statement so paxr can recover the line number.
     Debug { args: Vec<DebugArg>, span: Span },
-    /// `terminate <status> [message]` early-exit. `message` is only valid when
-    /// status is `Failed` (parser-enforced). Compiles to PA's `Terminate`
-    /// action; paxr halts execution on reaching it.
+    /// `terminate <status> [message] [code <code-expr>]` early-exit.
+    /// `message` and `code` are only valid when status is `Failed`
+    /// (parser-enforced). Compiles to PA's `Terminate` action with
+    /// `runError.{message,code}` set when present; paxr halts execution
+    /// on reaching it.
     Terminate {
         status: TerminateStatus,
         message: Option<Expr>,
+        code: Option<Expr>,
         span: Span,
     },
     /// `on <status> [or <status>]* <target> { body }` -- error-path (or

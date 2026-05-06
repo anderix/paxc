@@ -513,15 +513,16 @@ enum NativeStmt {
         name: Option<String>,
         body: Vec<NativeStmt>,
     },
-    /// Pax `terminate <status> [message]`. The PA action is `Terminate` with
-    /// `inputs.runStatus` carrying the status and an optional
-    /// `inputs.runError.message` carrying the message (only when status is
-    /// Failed). Message is already-rendered pax source (a string literal or
-    /// PA-expression-translated value); when None, no message clause is
-    /// emitted.
+    /// Pax `terminate <status> [message] [code <code-expr>]`. The PA action
+    /// is `Terminate` with `inputs.runStatus` carrying the status and an
+    /// optional `inputs.runError.{message,code}` carrying the diagnostic
+    /// fields (only when status is Failed). Both fields are already-rendered
+    /// pax source (string literals or PA-expression-translated values);
+    /// when None, the corresponding clause is omitted.
     Terminate {
         status: TerminateKind,
         message: Option<String>,
+        code: Option<String>,
     },
     /// Pax `on <statuses> <target> { ... }`. Decoded from a Scope action
     /// whose `runAfter` is handler-style (a single target with one or more
@@ -920,12 +921,13 @@ fn try_decode_native(
     }
 }
 
-/// Recover `terminate <status> [message]` from a PA Terminate action.
-/// Returns None if `runStatus` is missing or unrecognized; for Failed with
-/// a `runError.message`, the message must render via paexpr (literal or
-/// translatable expression), otherwise the whole action falls back so the
-/// message isn't lost. Other status values can't carry a message in pax,
-/// so an extraneous `runError` block on Succeeded/Cancelled is dropped
+/// Recover `terminate <status> [message] [code <code-expr>]` from a PA
+/// Terminate action. Returns None if `runStatus` is missing or
+/// unrecognized; for Failed with a `runError.message` or `runError.code`,
+/// each present field must render via paexpr (literal or translatable
+/// expression), otherwise the whole action falls back so neither field
+/// is lost. Other status values can't carry runError fields in pax, so
+/// an extraneous `runError` block on Succeeded/Cancelled is dropped
 /// quietly — PA's contract is that those statuses don't use the field.
 fn decode_terminate(
     action: &Map<String, Value>,
@@ -934,19 +936,25 @@ fn decode_terminate(
     let inputs = action.get("inputs")?.as_object()?;
     let status_str = inputs.get("runStatus")?.as_str()?;
     let status = TerminateKind::from_pa(status_str)?;
-    let message = if status == TerminateKind::Failed {
-        match inputs
-            .get("runError")
-            .and_then(Value::as_object)
-            .and_then(|o| o.get("message"))
-        {
+    let (message, code) = if status == TerminateKind::Failed {
+        let run_error = inputs.get("runError").and_then(Value::as_object);
+        let message = match run_error.and_then(|o| o.get("message")) {
             Some(v) => Some(paexpr::json_to_pax(v, ctx)?),
             None => None,
-        }
+        };
+        let code = match run_error.and_then(|o| o.get("code")) {
+            Some(v) => Some(paexpr::json_to_pax(v, ctx)?),
+            None => None,
+        };
+        (message, code)
     } else {
-        None
+        (None, None)
     };
-    Some(NativeStmt::Terminate { status, message })
+    Some(NativeStmt::Terminate {
+        status,
+        message,
+        code,
+    })
 }
 
 /// Container action types: If/Foreach/Until/Switch/Scope. Each recurses
@@ -1396,9 +1404,17 @@ fn format_native_stmt(stmt: &NativeStmt, depth: usize) -> String {
             s.push_str(&format!("{indent}}}"));
             s
         }
-        NativeStmt::Terminate { status, message } => match message {
-            Some(msg) => format!("{indent}terminate {} {msg}", status.keyword()),
-            None => format!("{indent}terminate {}", status.keyword()),
+        NativeStmt::Terminate {
+            status,
+            message,
+            code,
+        } => match (message, code) {
+            (Some(msg), Some(c)) => {
+                format!("{indent}terminate {} {msg} code {c}", status.keyword())
+            }
+            (Some(msg), None) => format!("{indent}terminate {} {msg}", status.keyword()),
+            (None, Some(c)) => format!("{indent}terminate {} code {c}", status.keyword()),
+            (None, None) => format!("{indent}terminate {}", status.keyword()),
         },
         NativeStmt::OnHandler {
             statuses,
@@ -2804,6 +2820,40 @@ mod tests {
             format_native_stmt(&stmt, 0),
             "terminate failed triggerBody()"
         );
+    }
+
+    #[test]
+    fn decode_terminate_failed_with_code_and_message() {
+        // PA's runError carries both `code` and `message`; pax preserves
+        // both via the `code <expr>` keyword clause.
+        let action = json!({
+            "type": "Terminate",
+            "inputs": {
+                "runStatus": "Failed",
+                "runError": {
+                    "code": "Invalid item",
+                    "message": "No title"
+                }
+            }
+        });
+        let stmt = try_decode(&action).unwrap();
+        assert_eq!(
+            format_native_stmt(&stmt, 0),
+            "terminate failed \"No title\" code \"Invalid item\""
+        );
+    }
+
+    #[test]
+    fn decode_terminate_failed_with_code_only() {
+        let action = json!({
+            "type": "Terminate",
+            "inputs": {
+                "runStatus": "Failed",
+                "runError": { "code": "X" }
+            }
+        });
+        let stmt = try_decode(&action).unwrap();
+        assert_eq!(format_native_stmt(&stmt, 0), "terminate failed code \"X\"");
     }
 
     // ---------- 44e: on-handler ----------

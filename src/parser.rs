@@ -393,31 +393,57 @@ where
                 span: e.span(),
             });
 
-        // `terminate <status> [message]`. Status is one of succeeded / failed /
-        // cancelled. Only `failed` accepts a trailing message expression; the
-        // other statuses never consume one, so a plain `terminate succeeded`
-        // followed by a new statement on the next line parses cleanly without
-        // the expr parser greedily eating the next identifier.
+        // `terminate <status> [message] [code <code-expr>]`. Status is one of
+        // succeeded / failed / cancelled. Only `failed` accepts a trailing
+        // message expression and/or `code` clause; the other statuses never
+        // consume one, so `terminate succeeded` followed by a new statement
+        // parses cleanly without the expr parser greedily eating the next
+        // identifier.
+        //
+        // `code` is a contextual keyword: when followed by an expression in
+        // this slot, it introduces the code clause. A bare `code` (no expr
+        // after) falls through to be parsed as an identifier reference, so
+        // `terminate failed code` (with `code` a string variable) still works
+        // as a message-only form.
+        let code_arg = just(Token::Ident("code"))
+            .ignore_then(expr.clone())
+            .labelled("`code` keyword followed by an expression");
+        // Three shapes after `failed`:
+        //   a) <code-arg>                    -- code only, no message
+        //   b) <message-expr> [<code-arg>]   -- message, optional code
+        //   c) (nothing)                     -- no message, no code
+        // Order matters: try (a) first so `code "x"` doesn't get parsed as
+        // a bare Ref("code") that then leaves "x" stranded.
+        let failed_args = code_arg
+            .clone()
+            .map(|c| (None, Some(c)))
+            .or(expr
+                .clone()
+                .then(code_arg.clone().or_not())
+                .map(|(m, c)| (Some(m), c)))
+            .or_not()
+            .map(|opt| opt.unwrap_or((None, None)));
+
         let failed_form = select! { Token::Ident("failed") => () }
-            .ignore_then(expr.clone().or_not())
-            .map(|msg| (TerminateStatus::Failed, msg));
-        let succeeded_form =
-            select! { Token::Ident("succeeded") => () }.map(|_| (TerminateStatus::Succeeded, None));
-        let cancelled_form =
-            select! { Token::Ident("cancelled") => () }.map(|_| (TerminateStatus::Cancelled, None));
+            .ignore_then(failed_args)
+            .map(|(message, code)| (TerminateStatus::Failed, message, code));
+        let succeeded_form = select! { Token::Ident("succeeded") => () }
+            .map(|_| (TerminateStatus::Succeeded, None, None));
+        let cancelled_form = select! { Token::Ident("cancelled") => () }
+            .map(|_| (TerminateStatus::Cancelled, None, None));
         let terminate_body = failed_form
             .or(succeeded_form)
             .or(cancelled_form)
             .labelled("terminate status (succeeded, failed, or cancelled)");
 
-        let terminate_stmt =
-            just(Token::Terminate)
-                .ignore_then(terminate_body)
-                .map_with(|(status, message), e| Stmt::Terminate {
-                    status,
-                    message,
-                    span: e.span(),
-                });
+        let terminate_stmt = just(Token::Terminate)
+            .ignore_then(terminate_body)
+            .map_with(|(status, message, code), e| Stmt::Terminate {
+                status,
+                message,
+                code,
+                span: e.span(),
+            });
 
         // Case values are restricted to scalar literals (string / int / bool),
         // matching PA's constraint. Arbitrary expressions are not allowed.
@@ -756,6 +782,7 @@ mod tests {
             Stmt::Terminate {
                 status: TerminateStatus::Succeeded,
                 message: None,
+                code: None,
                 ..
             }
         ));
@@ -768,6 +795,7 @@ mod tests {
             Stmt::Terminate {
                 status: TerminateStatus::Failed,
                 message: Some(Expr::Literal(Literal::String(s))),
+                code: None,
                 ..
             } => assert_eq!(s, "queue empty"),
             other => panic!("expected terminate failed with string message, got {other:?}"),
@@ -783,6 +811,7 @@ mod tests {
             Stmt::Terminate {
                 status: TerminateStatus::Failed,
                 message: Some(Expr::BinaryOp { .. }),
+                code: None,
                 ..
             }
         ));
@@ -796,9 +825,58 @@ mod tests {
             Stmt::Terminate {
                 status: TerminateStatus::Cancelled,
                 message: None,
+                code: None,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn terminate_failed_with_message_and_code() {
+        let prog = parse(r#"terminate failed "No title" code "Invalid item""#);
+        match &prog.statements[0] {
+            Stmt::Terminate {
+                status: TerminateStatus::Failed,
+                message: Some(Expr::Literal(Literal::String(m))),
+                code: Some(Expr::Literal(Literal::String(c))),
+                ..
+            } => {
+                assert_eq!(m, "No title");
+                assert_eq!(c, "Invalid item");
+            }
+            other => panic!("expected message+code, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminate_failed_with_code_only() {
+        let prog = parse(r#"terminate failed code "X""#);
+        match &prog.statements[0] {
+            Stmt::Terminate {
+                status: TerminateStatus::Failed,
+                message: None,
+                code: Some(Expr::Literal(Literal::String(c))),
+                ..
+            } => assert_eq!(c, "X"),
+            other => panic!("expected code-only, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminate_failed_message_with_var_named_code_still_works() {
+        // `code` is a contextual keyword. A bare `code` (no expr after) is a
+        // valid identifier reference, so `terminate failed code` (a string
+        // var named `code`) parses as message-only.
+        let prog = parse("var code: string = \"x\"\nterminate failed code");
+        match &prog.statements[1] {
+            Stmt::Terminate {
+                status: TerminateStatus::Failed,
+                message: Some(Expr::Ref { name, .. }),
+                code: None,
+                ..
+            } => assert_eq!(name, "code"),
+            other => panic!("expected message=Ref(code), code=None; got {other:?}"),
+        }
     }
 
     #[test]

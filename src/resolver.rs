@@ -144,12 +144,13 @@ pub enum ActionKind {
         args: Vec<DebugArg>,
         span: Span,
     },
-    /// `terminate <status> [message]`. Compiles to a PA Terminate action;
-    /// paxr halts execution on reaching one. Message is only present when
-    /// status is Failed (parser-enforced).
+    /// `terminate <status> [message] [code <code-expr>]`. Compiles to a PA
+    /// Terminate action; paxr halts execution on reaching one. Both message
+    /// and code are only present when status is Failed (parser-enforced).
     Terminate {
         status: TerminateStatus,
         message: Option<Expr>,
+        code: Option<Expr>,
     },
     /// `scope [name] { body }` -- a PA Scope action. Pure container; the
     /// interpreter walks the body like any other block. Only the name form
@@ -1129,10 +1130,15 @@ fn resolve_statements(
             Stmt::Terminate {
                 status,
                 message,
+                code,
                 span,
             } => {
                 let resolved_message = match message {
                     Some(m) => Some(resolve_expr(m, env)?),
+                    None => None,
+                };
+                let resolved_code = match code {
+                    Some(c) => Some(resolve_expr(c, env)?),
                     None => None,
                 };
                 let action_name = unique_name(key_prefix::TERMINATE, name_counts);
@@ -1141,6 +1147,7 @@ fn resolve_statements(
                     ActionKind::Terminate {
                         status: *status,
                         message: resolved_message,
+                        code: resolved_code,
                     },
                     *span,
                 )

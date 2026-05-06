@@ -334,12 +334,16 @@ terminate succeeded
 terminate failed
 terminate failed "queue is empty"
 terminate failed "validation failed at step " & step_name
+terminate failed "No title" code "Invalid item"
+terminate failed code "Invalid item"
 terminate cancelled
 ```
 
-`terminate` early-exits the flow. The syntax is `terminate <status> [message]`. Status is one of `succeeded`, `failed`, or `cancelled`. A message is only accepted after `failed`, because Power Automate's `runError` field is ignored on the other statuses. The message is any expression that evaluates to a string, so `&` concat and variable references both work.
+`terminate` early-exits the flow. The syntax is `terminate <status> [<message>] [code <code-expr>]`. Status is one of `succeeded`, `failed`, or `cancelled`. The message and `code` clauses are only accepted after `failed`, because Power Automate's `runError` field is ignored on the other statuses. Both are expressions that evaluate to strings; `&` concat and variable references both work. The `code` clause is independent of the message — you can supply either, both, or neither.
 
-Compiles to a Power Automate `Terminate` action with `runStatus` set and, for the failed form, a `runError.message` field. paxr halts execution on reaching a `terminate`: subsequent statements do not run, including those enclosed by `foreach` or `if` at higher scopes. The end-of-run state dump still prints and reflects what was set up to the point of termination.
+`code` is a contextual keyword: it introduces the code clause only when followed by an expression. A bare trailing `code` (no expression after) parses as an identifier reference, so `terminate failed code` (with `code` a string variable) still works as the message-only form.
+
+Compiles to a Power Automate `Terminate` action with `runStatus` set and, for the failed form, a `runError` block containing `code` and/or `message` fields when present. paxr halts execution on reaching a `terminate`: subsequent statements do not run, including those enclosed by `foreach` or `if` at higher scopes. The end-of-run state dump still prints and reflects what was set up to the point of termination.
 
 ## Function calls
 

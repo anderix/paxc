@@ -579,14 +579,26 @@ impl<'src> Interpreter<'src> {
                 self.run_actions(body, false)?;
                 self.indent -= 1;
             }
-            ActionKind::Terminate { status, message } => {
-                let rendered = match message {
+            ActionKind::Terminate {
+                status,
+                message,
+                code,
+            } => {
+                let rendered_msg = match message {
                     Some(m) => Some(self.eval(m)?.coerce_str()),
                     None => None,
                 };
-                let line = match &rendered {
-                    Some(msg) => format!("terminate: {}: {msg}", status.as_label()),
-                    None => format!("terminate: {}", status.as_label()),
+                let rendered_code = match code {
+                    Some(c) => Some(self.eval(c)?.coerce_str()),
+                    None => None,
+                };
+                let line = match (&rendered_code, &rendered_msg) {
+                    (Some(c), Some(m)) => {
+                        format!("terminate: {}: [{c}] {m}", status.as_label())
+                    }
+                    (Some(c), None) => format!("terminate: {}: [{c}]", status.as_label()),
+                    (None, Some(m)) => format!("terminate: {}: {m}", status.as_label()),
+                    (None, None) => format!("terminate: {}", status.as_label()),
                 };
                 // Same visibility rules as debug() breadcrumbs: prints under
                 // default, --verbose, and --debug; silenced by --quiet.
