@@ -450,6 +450,21 @@ impl<'src> Interpreter<'src> {
             } => {
                 let items = match self.eval(collection)? {
                     Value::Array(items) => items,
+                    // Null collection = "couldn't compute this" -- the
+                    // upstream value is paxr's marker for connector
+                    // outputs / unknown accessors / null-safe subscript
+                    // chains that bottomed out. Skip with a notice in
+                    // the same shape as the pa-action and unknown-call
+                    // skips, so paxr stays usable on connector-driven
+                    // flows. Other non-array types still error -- those
+                    // are real bugs in the pax.
+                    Value::Null => {
+                        self.print_notice(&format!(
+                            "<skipping foreach {}: collection is null>",
+                            action.name
+                        ));
+                        return Ok(());
+                    }
                     _ => return Err(err("foreach requires an array")),
                 };
                 self.trace(&format!("foreach {} ({} items)", action.name, items.len()));
@@ -1113,6 +1128,25 @@ mod tests {
     fn foreach_iteration_works() {
         run("var total: int = 0\nvar items: array = [1, 2, 3]\nforeach item in items { total += 1 }")
             .unwrap();
+    }
+
+    #[test]
+    fn foreach_over_null_collection_skips_with_notice() {
+        // Real-flow scenario: foreach iterates outputs("<connector>")?[...].
+        // The connector is a `pa <Name>` action paxr can't simulate, so
+        // outputs(...) returns null, ?[...] of null is null, and the
+        // foreach receives null. Lenient-on-null lets paxr complete the
+        // run instead of erroring out on every connector-driven flow.
+        let res = run(
+            r#"var total: int = 0
+foreach item in outputs("Get_things")?["body/value"] {
+  total += 1
+}"#,
+        );
+        assert!(
+            res.is_ok(),
+            "foreach over null should skip cleanly; got {res:?}"
+        );
     }
 
     #[test]
