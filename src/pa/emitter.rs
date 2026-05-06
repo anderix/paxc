@@ -260,22 +260,111 @@ fn emit_condition(
     true_branch: &[ResolvedAction],
     false_branch: &[ResolvedAction],
 ) -> Value {
-    // Skip the `equals(_, true)` auto-wrap when the condition is already a
-    // boolean-producing expression (a comparison op). Bare refs, member access,
-    // etc. still need the wrap so PA sees a boolean.
-    let expression = if is_boolean_expr(condition) {
-        format!("@{}", pa_expr(condition))
-    } else {
-        format!("@equals({}, true)", pa_expr(condition))
-    };
     json!({
         "type": action::IF,
-        "expression": expression,
+        "expression": condition_to_value(condition),
         "actions": build_actions_map(true_branch),
         "else": {
             "actions": build_actions_map(false_branch),
         }
     })
+}
+
+/// Top-level entry point for an If action's `expression` field. Always
+/// returns a structured object whose root key is `and` / `or` -- matching
+/// PA designer's own export convention. The designer renders blank when
+/// the expression is a string OR when it's a bare predicate without an
+/// outer logical wrap, so paxc imitates the wrap exactly: even a single
+/// `equals(...)` rule comes out as `{"and": [{"equals": [...]}]}`.
+fn condition_to_value(expr: &Expr) -> Value {
+    let inner = condition_node(expr);
+    // If the root is already a logical combinator (and/or), keep it as-is.
+    // Otherwise wrap in `and: [...]` so designer renders the rule list.
+    if let Value::Object(map) = &inner
+        && map.len() == 1
+        && matches!(map.keys().next().unwrap().as_str(), "and" | "or")
+    {
+        return inner;
+    }
+    json!({ "and": [inner] })
+}
+
+/// Build a single PA condition node (no top-level wrap). Used both for
+/// the operand position inside and/or arrays and as the body of the
+/// outer wrap in [`condition_to_value`].
+///
+/// Shapes:
+/// - and/or → `{op: [<cond>, <cond>, ...]}`
+/// - not    → `{"not": <cond>}` (single child, not array — matches PA exports)
+/// - comparisons / predicates → `{op: [<value>, <value>, ...]}`
+/// - leaves: literals as bare JSON, expressions as `"@<pa-expr>"` strings
+///
+/// Anything paxc can't classify as a known boolean op gets the conservative
+/// `equals(_, true)` wrap, same auto-wrap rule paxc has always applied for
+/// non-boolean condition expressions.
+fn condition_node(expr: &Expr) -> Value {
+    if let Some(v) = try_condition_node(expr) {
+        return v;
+    }
+    json!({ "equals": [condition_operand_value(expr), true] })
+}
+
+fn try_condition_node(expr: &Expr) -> Option<Value> {
+    match expr {
+        Expr::BinaryOp { op, lhs, rhs } => match op {
+            BinOp::And => Some(json!({
+                "and": [condition_node(lhs), condition_node(rhs)]
+            })),
+            BinOp::Or => Some(json!({
+                "or": [condition_node(lhs), condition_node(rhs)]
+            })),
+            BinOp::Equals => Some(json!({
+                "equals": [condition_operand_value(lhs), condition_operand_value(rhs)]
+            })),
+            BinOp::NotEquals => Some(json!({
+                "not": { "equals": [condition_operand_value(lhs), condition_operand_value(rhs)] }
+            })),
+            BinOp::Less => Some(json!({
+                "less": [condition_operand_value(lhs), condition_operand_value(rhs)]
+            })),
+            BinOp::LessEq => Some(json!({
+                "lessOrEquals": [condition_operand_value(lhs), condition_operand_value(rhs)]
+            })),
+            BinOp::Greater => Some(json!({
+                "greater": [condition_operand_value(lhs), condition_operand_value(rhs)]
+            })),
+            BinOp::GreaterEq => Some(json!({
+                "greaterOrEquals": [condition_operand_value(lhs), condition_operand_value(rhs)]
+            })),
+            _ => None,
+        },
+        Expr::UnaryOp {
+            op: UnaryOp::Not,
+            operand,
+        } => Some(json!({ "not": condition_node(operand) })),
+        Expr::Call { name, args } => match name.as_str() {
+            "and" | "or" => Some(json!({
+                name.as_str(): args.iter().map(condition_node).collect::<Vec<_>>()
+            })),
+            "not" if args.len() == 1 => Some(json!({ "not": condition_node(&args[0]) })),
+            "equals" | "less" | "lessOrEquals" | "greater" | "greaterOrEquals" | "contains"
+            | "startsWith" | "endsWith" | "empty" => Some(json!({
+                name.as_str(): args.iter().map(condition_operand_value).collect::<Vec<_>>()
+            })),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Render a leaf operand for a structured condition. Literals stay as bare
+/// JSON values (PA accepts bare bool/number/string at operand slots);
+/// anything else becomes an `@`-prefixed PA expression string.
+fn condition_operand_value(expr: &Expr) -> Value {
+    match expr {
+        Expr::Literal(lit) => literal_to_json(lit),
+        _ => Value::String(format!("@{}", pa_expr(expr))),
+    }
 }
 
 fn is_boolean_expr(expr: &Expr) -> bool {
@@ -654,25 +743,31 @@ var msg: string = "count: " & total + 1"#,
     }
 
     #[test]
-    fn slice16_condition_with_comparison_skips_autowrap() {
+    fn slice16_condition_with_comparison_emits_structured_form() {
         let out = compile(
             r#"var a: int = 5
 if a > 0 {
 }"#,
         );
         let cond = &out["definition"]["actions"]["Condition"]["expression"];
-        assert_eq!(cond.as_str().unwrap(), "@greater(variables('a'), 0)");
+        assert_eq!(
+            cond,
+            &json!({ "and": [{ "greater": ["@variables('a')", 0] }] })
+        );
     }
 
     #[test]
-    fn slice16_condition_with_bare_ref_still_autowraps() {
+    fn slice16_condition_with_bare_ref_wraps_in_structured_equals() {
         let out = compile(
             r#"var ok: bool = true
 if ok {
 }"#,
         );
         let cond = &out["definition"]["actions"]["Condition"]["expression"];
-        assert_eq!(cond.as_str().unwrap(), "@equals(variables('ok'), true)");
+        assert_eq!(
+            cond,
+            &json!({ "and": [{ "equals": ["@variables('ok')", true] }] })
+        );
     }
 
     #[test]
@@ -719,7 +814,7 @@ let x = a || b && c"#,
     }
 
     #[test]
-    fn slice17_condition_with_logical_skips_autowrap() {
+    fn slice17_condition_with_logical_emits_structured_and() {
         let out = compile(
             r#"var a: int = 5
 var b: int = 3
@@ -728,20 +823,30 @@ if a > 0 && b > 0 {
         );
         let cond = &out["definition"]["actions"]["Condition"]["expression"];
         assert_eq!(
-            cond.as_str().unwrap(),
-            "@and(greater(variables('a'), 0), greater(variables('b'), 0))"
+            cond,
+            &json!({
+                "and": [
+                    { "greater": ["@variables('a')", 0] },
+                    { "greater": ["@variables('b')", 0] },
+                ]
+            })
         );
     }
 
     #[test]
-    fn slice17_condition_with_not_skips_autowrap() {
+    fn slice17_condition_with_not_emits_structured_not() {
         let out = compile(
             r#"var ok: bool = true
 if !ok {
 }"#,
         );
         let cond = &out["definition"]["actions"]["Condition"]["expression"];
-        assert_eq!(cond.as_str().unwrap(), "@not(variables('ok'))");
+        assert_eq!(
+            cond,
+            &json!({
+                "and": [{ "not": { "equals": ["@variables('ok')", true] } }]
+            })
+        );
     }
 
     #[test]
@@ -785,17 +890,18 @@ let n = length(concat("x", "y"))"#,
 if empty(items) {
 }"#,
         );
-        // Slice 45a polish: PA functions with boolean return type
-        // (`empty`, `and`, `equals`, etc.) skip the defensive
-        // `equals(_, true)` wrap.
         let cond = &out["definition"]["actions"]["Condition"]["expression"];
-        assert_eq!(cond.as_str().unwrap(), "@empty(variables('items'))");
+        assert_eq!(
+            cond,
+            &json!({ "and": [{ "empty": ["@variables('items')"] }] })
+        );
     }
 
     #[test]
     fn slice45a_call_with_unknown_return_type_still_wraps() {
-        // Calls whose name isn't on the boolean-return allowlist still
-        // get the conservative wrap so PA gets a real boolean shape.
+        // Calls whose name isn't on the recognized condition-op list still
+        // get the conservative `equals(_, true)` wrap so PA gets a real
+        // boolean shape.
         let out = compile(
             r#"var items: array = []
 if length(items) {
@@ -803,8 +909,10 @@ if length(items) {
         );
         let cond = &out["definition"]["actions"]["Condition"]["expression"];
         assert_eq!(
-            cond.as_str().unwrap(),
-            "@equals(length(variables('items')), true)"
+            cond,
+            &json!({
+                "and": [{ "equals": ["@length(variables('items'))", true] }]
+            })
         );
     }
 
