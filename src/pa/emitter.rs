@@ -419,14 +419,109 @@ fn emit_mutation(action_type: &str, var: &str, value: &Expr) -> Value {
 fn expr_to_json(value: &Expr) -> Value {
     match value {
         Expr::Literal(lit) => literal_to_json(lit),
-        // Single-expression non-literal values use the bare `@<expr>` form,
-        // not the string-interpolation `@{<expr>}` form. Bare-`@` preserves
-        // the expression's natural return type (so an integer-typed variable
-        // initialized to `@int(...)` actually stores an integer); `@{...}`
-        // would coerce the result to a string. PA designer always writes
-        // bare `@` for full-expression values; matching that convention
-        // also keeps decode/re-encode round-trips byte-identical.
-        _ => json!(format!("@{}", pa_expr(value))),
+        _ => {
+            // String-template form: a `&`-concatenation chain that mixes
+            // literal text with subexpressions emits as PA's designer-style
+            // template ("text @{expr} more @{expr}") rather than nested
+            // `concat()` calls. Designer renders templates as inline
+            // expression bubbles inside a string; concat chains render as
+            // one opaque expression, which is harder to read and edit.
+            if let Some(template) = try_string_template(value) {
+                return Value::String(template);
+            }
+            // Single-expression non-literal values use the bare `@<expr>`
+            // form, not `@{<expr>}`. Bare-`@` preserves the expression's
+            // natural return type (so an integer-typed variable initialized
+            // to `@int(...)` stores an integer); `@{...}` would coerce to
+            // string. PA designer always writes bare `@` for full-expression
+            // values; matching that convention also keeps round-trips
+            // byte-identical.
+            json!(format!("@{}", pa_expr(value)))
+        }
+    }
+}
+
+/// If `expr` is a `&`-concatenation chain that contains at least one
+/// string literal *and* at least one non-literal subexpression, return
+/// PA's template form: literal segments inlined verbatim, expression
+/// segments wrapped in `@{...}`. Otherwise return None so the caller
+/// falls back to the bare `@<expr>` form.
+///
+/// Pure-literal chains and pure-expression chains both fall through:
+/// the former is unusual (resolver folds adjacent literals via concat),
+/// the latter renders fine as `@concat(a, b)`. Only mixed chains gain
+/// readability from the template form.
+fn try_string_template(expr: &Expr) -> Option<String> {
+    if !matches!(
+        expr,
+        Expr::BinaryOp {
+            op: BinOp::Concat,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let parts = flatten_concat(expr);
+    let has_literal = parts.iter().any(|p| matches!(p, Expr::Literal(_)));
+    let has_expr = parts.iter().any(|p| !matches!(p, Expr::Literal(_)));
+    if !has_literal || !has_expr {
+        return None;
+    }
+    let mut out = String::new();
+    for part in parts {
+        match part {
+            Expr::Literal(Literal::String(s)) => {
+                // PA template literals treat `@` as the start of an
+                // expression; double it to escape. Empty strings contribute
+                // nothing -- a `"" & x` chain just renders as `@{x}`.
+                out.push_str(&s.replace('@', "@@"));
+            }
+            Expr::Literal(lit) => {
+                // Non-string literals shouldn't appear in a `&` chain
+                // (the resolver requires string operands), but render
+                // defensively as raw text rather than panic.
+                out.push_str(&literal_as_text(lit));
+            }
+            other => {
+                out.push_str("@{");
+                out.push_str(&pa_expr(other));
+                out.push('}');
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Walk a left-associative Concat tree and flatten it into the list of
+/// terminal operands in source order. Non-Concat nodes return as a
+/// singleton vec so this composes cleanly during recursion.
+fn flatten_concat(expr: &Expr) -> Vec<&Expr> {
+    match expr {
+        Expr::BinaryOp {
+            op: BinOp::Concat,
+            lhs,
+            rhs,
+        } => {
+            let mut out = flatten_concat(lhs);
+            out.extend(flatten_concat(rhs));
+            out
+        }
+        _ => vec![expr],
+    }
+}
+
+/// Stringify a non-string literal for use inside a template segment.
+/// Only reachable defensively -- the resolver rejects non-string `&`
+/// operands -- but kept so an unexpected shape produces a sensible
+/// fallback instead of a panic.
+fn literal_as_text(lit: &Literal) -> String {
+    match lit {
+        Literal::Null => "null".to_string(),
+        Literal::Int(n) => n.to_string(),
+        Literal::Float(f) => format_float(*f),
+        Literal::Bool(b) => b.to_string(),
+        Literal::String(s) => s.clone(),
+        Literal::Array(_) | Literal::Object(_) => String::new(),
     }
 }
 
@@ -715,10 +810,7 @@ mod tests {
 var msg: string = "count: " & total + 1"#,
         );
         let v = &out["definition"]["actions"]["Initialize_msg"]["inputs"]["variables"][0]["value"];
-        assert_eq!(
-            v.as_str().unwrap(),
-            "@concat('count: ', add(variables('total'), 1))"
-        );
+        assert_eq!(v.as_str().unwrap(), "count: @{add(variables('total'), 1)}");
     }
 
     #[test]
@@ -956,7 +1048,7 @@ if length(items) {
 let greeting = "hello " & name"#,
         );
         let v = &out["definition"]["actions"]["Compose_greeting"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@concat('hello ', variables('name'))");
+        assert_eq!(v.as_str().unwrap(), "hello @{variables('name')}");
     }
 
     #[test]
@@ -988,7 +1080,9 @@ let x = a != b || a == 0"#,
     }
 
     #[test]
-    fn slice14_concat_emits_concat_function() {
+    fn slice14_concat_with_literal_emits_template_form() {
+        // Mixed literal + expression chains use PA's designer-style
+        // string-template form ("text @{expr}") rather than @concat(...).
         let out = compile(
             r#"var greeting: string = "hello"
 var message: string = greeting & ", world""#,
@@ -997,8 +1091,53 @@ var message: string = greeting & ", world""#,
             &out["definition"]["actions"]["Initialize_message"]["inputs"]["variables"][0]["value"];
         assert_eq!(
             msg_value.as_str().unwrap(),
-            "@concat(variables('greeting'), ', world')"
+            "@{variables('greeting')}, world"
         );
+    }
+
+    #[test]
+    fn template_form_used_for_three_part_chain_with_literal_separator() {
+        // The signoff_list pattern from real PA exports: multiple expression
+        // segments separated by literal text. Designer emits this exact form.
+        let out = compile(
+            r#"var email: string = "a@b.com"
+var title: string = "x"
+var line: string = email & "|" & title"#,
+        );
+        let v = &out["definition"]["actions"]["Initialize_line"]["inputs"]["variables"][0]["value"];
+        assert_eq!(
+            v.as_str().unwrap(),
+            "@{variables('email')}|@{variables('title')}"
+        );
+    }
+
+    #[test]
+    fn template_form_skipped_when_all_expressions() {
+        // Pure-expression chains (no literal text) keep the bare-`@concat(...)`
+        // form -- there's nothing to gain from `@{a}@{b}`, and the concat form
+        // matches what designer writes when users build chains without text.
+        let out = compile(
+            r#"var a: string = "x"
+var b: string = "y"
+var c: string = a & b"#,
+        );
+        let v = &out["definition"]["actions"]["Initialize_c"]["inputs"]["variables"][0]["value"];
+        assert_eq!(
+            v.as_str().unwrap(),
+            "@concat(variables('a'), variables('b'))"
+        );
+    }
+
+    #[test]
+    fn template_form_escapes_at_signs_in_literal_segments() {
+        // Bare `@` in a literal would be misread as the start of an expression;
+        // escape to `@@` so PA renders the literal `@`.
+        let out = compile(
+            r#"var name: string = "alice"
+var line: string = "contact @ " & name"#,
+        );
+        let v = &out["definition"]["actions"]["Initialize_line"]["inputs"]["variables"][0]["value"];
+        assert_eq!(v.as_str().unwrap(), "contact @@ @{variables('name')}");
     }
 
     #[test]
@@ -1057,17 +1196,13 @@ msg &= "!""#,
 
     #[test]
     fn slice22_terminate_failed_with_expression_message() {
-        // Message expression should be emitted as a PA expression string.
+        // A mixed literal + expression message emits as PA's template form
+        // ("failed at @{variables('step')}") rather than @concat(...).
         let out =
             compile("var step: string = \"validate\"\nterminate failed \"failed at \" & step");
         let action = &out["definition"]["actions"]["Terminate"];
         let msg = action["inputs"]["runError"]["message"].as_str().unwrap();
-        assert!(
-            msg.starts_with("@"),
-            "expected PA expression wrapping, got {msg}"
-        );
-        assert!(msg.contains("concat"));
-        assert!(msg.contains("failed at"));
+        assert_eq!(msg, "failed at @{variables('step')}");
     }
 
     #[test]
