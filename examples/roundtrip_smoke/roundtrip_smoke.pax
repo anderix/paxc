@@ -1,0 +1,162 @@
+// roundtrip_smoke.pax -- manual round-trip test bed for paxc 3.7.0.
+//
+// Exercises every emit-shape fix from the 3.6.2 / 3.7.0 design sweep:
+//
+//   1. If condition expressions emit as PA designer's structured object form
+//      ({"and": [{"equals": [...]}]}) instead of "@equals(...)" strings,
+//      so designer renders the rule list instead of going blank.
+//   2. Single-expression value fields (Init / Set / Compose / etc.) use
+//      the bare "@expr" form -- preserves natural type, matches designer.
+//   3. Mixed literal+expression chains use PA's string-template form
+//      ("text @{expr} more @{expr}") instead of nested concat() calls.
+//   4. `terminate failed` accepts an optional `code <expr>` clause for
+//      PA's runError.code field.
+//
+// Plus every other built-in container so a designer round-trip exercises
+// the foreach-key-derives-from-iterator name fix and the variable-zero
+// initializer form. No connectors, no opaque pa<Name> blocks -- this
+// file compiles to a self-contained PA flow that imports as-is and runs
+// from the manual (Button) trigger.
+//
+// Manual round-trip recipe:
+//
+//   1. paxc examples/roundtrip_smoke.pax --target pa-legacy --out /tmp/rt.zip
+//   2. Import into Power Automate, eyeball the designer rendering.
+//   3. Make small edits in the designer (rename variables, tweak values,
+//      add a step). Export the flow as a legacy package.
+//   4. paxc --decode <exported.zip> --out-dir /tmp/rt-back
+//   5. Diff /tmp/rt-back/roundtrip_smoke.pax against this file (or run
+//      `paxc /tmp/rt-back/...pax --target pa-legacy --out /tmp/rt2.zip`
+//      and diff the inner definition.json against the export).
+
+// ---------- Variable lifecycle: every type, every init shape ----------
+
+// No-initializer form (zero-default per type).
+var counter: int
+var ratio: float
+var label: string
+var done: bool
+var bag: array
+var meta: object
+
+// Literal initializers.
+var threshold: int = 10
+var pi: float = 3.14
+var greeting: string = "hello"
+var enabled: bool = true
+
+// Single-expression initializer (must emit as bare `@expr`, not `@{expr}`,
+// so PA preserves the integer type for `total` here).
+var base: int = 100
+var total: int = base + threshold
+
+// Mixed literal + expression chain initializer (must emit as template
+// form `Status: @{...}`, not `@concat('Status: ', variables('label'))`).
+var status_line: string = "Status: " & label & " (priority " & threshold & ")"
+
+// ---------- Variable mutations: every shape ----------
+
+counter = 1
+counter += 5
+counter -= 2
+threshold += 3
+
+// Append-to-string with template form on the value side.
+label &= " >> processed by counter=" & counter
+
+// Append-to-array with a literal element.
+bag += "first-entry"
+
+// ---------- Compose: bare expression and template form ----------
+
+// Single-expression value.
+let snapshot = total
+
+// Mixed literal + expression value (template form).
+let report_line = "counter=" & counter & " total=" & total & " label=" & label
+
+// ---------- If / else with the structured-condition shapes ----------
+
+// Equality comparison (structured form).
+if counter == 0 {
+  done = true
+} else {
+  done = false
+}
+
+// Logical and / or with two predicates (structured `and: [equals, greater]`).
+if counter > 0 && total < 1000 {
+  enabled = true
+} else {
+  enabled = false
+}
+
+// Bare bool reference (structured `and: [equals: [@variables('done'), true]]`).
+if done {
+  greeting = "all done"
+}
+
+// Negation of a comparison (structured `and: [not: {equals: [...]}]`).
+if !(counter == 99) {
+  greeting &= " (still working)"
+}
+
+// Function-call predicate (structured `and: [empty: [@variables('bag')]]`).
+if empty(bag) {
+  bag += "filler"
+}
+
+// ---------- Switch ----------
+
+switch label {
+  case "hello" {
+    greeting = "matched literal hello"
+  }
+  case "queued" {
+    greeting = "queue path"
+  }
+  default {
+    greeting = "fallthrough"
+  }
+}
+
+// ---------- Foreach (action key derives from iterator name `entry`) ----------
+
+foreach entry in bag {
+  counter += 1
+  // Inside the body, `entry` references the current iteration item.
+  status_line &= " | saw " & entry
+}
+
+// ---------- Until ----------
+
+until counter > 50 {
+  counter += 5
+}
+
+// ---------- Scope + on-handler ----------
+
+scope wrap_up {
+  counter += 1
+  greeting &= " | wrapped"
+}
+
+on failed wrap_up {
+  // Only fires if wrap_up errors. Body is a regular sibling chain.
+  greeting &= " | recovered"
+}
+
+// ---------- Terminate variants (the new `code` clause) ----------
+
+if counter > 1000 {
+  // Both message and code -- PA's full runError shape.
+  terminate failed "counter overflow at " & counter code "OVERFLOW"
+}
+
+if total < 0 {
+  // Code-only form (no message).
+  terminate failed code "NEGATIVE_TOTAL"
+}
+
+// Happy path: end with a graceful succeeded.
+terminate succeeded
