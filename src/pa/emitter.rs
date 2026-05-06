@@ -419,7 +419,14 @@ fn emit_mutation(action_type: &str, var: &str, value: &Expr) -> Value {
 fn expr_to_json(value: &Expr) -> Value {
     match value {
         Expr::Literal(lit) => literal_to_json(lit),
-        _ => json!(format!("@{{{}}}", pa_expr(value))),
+        // Single-expression non-literal values use the bare `@<expr>` form,
+        // not the string-interpolation `@{<expr>}` form. Bare-`@` preserves
+        // the expression's natural return type (so an integer-typed variable
+        // initialized to `@int(...)` actually stores an integer); `@{...}`
+        // would coerce the result to a string. PA designer always writes
+        // bare `@` for full-expression values; matching that convention
+        // also keeps decode/re-encode round-trips byte-identical.
+        _ => json!(format!("@{}", pa_expr(value))),
     }
 }
 
@@ -596,12 +603,9 @@ mod tests {
             "#,
         );
         let email = &out["definition"]["actions"]["Compose_email"]["inputs"];
-        assert_eq!(
-            email.as_str().unwrap(),
-            "@{variables('data')?['body/email']}"
-        );
+        assert_eq!(email.as_str().unwrap(), "@variables('data')?['body/email']");
         let first = &out["definition"]["actions"]["Compose_first"]["inputs"];
-        assert_eq!(first.as_str().unwrap(), "@{variables('data')?[0]}");
+        assert_eq!(first.as_str().unwrap(), "@variables('data')?[0]");
     }
 
     #[test]
@@ -613,7 +617,7 @@ mod tests {
             "#,
         );
         let weird = &out["definition"]["actions"]["Compose_weird"]["inputs"];
-        assert_eq!(weird.as_str().unwrap(), "@{variables('data')?['it''s']}");
+        assert_eq!(weird.as_str().unwrap(), "@variables('data')?['it''s']");
     }
 
     #[test]
@@ -675,33 +679,33 @@ mod tests {
     fn slice15_arithmetic_emits_pa_functions() {
         let out = compile("var x: int = 2 + 3");
         let v = &out["definition"]["actions"]["Initialize_x"]["inputs"]["variables"][0]["value"];
-        assert_eq!(v.as_str().unwrap(), "@{add(2, 3)}");
+        assert_eq!(v.as_str().unwrap(), "@add(2, 3)");
 
         let out = compile("var x: int = 10 - 4");
         let v = &out["definition"]["actions"]["Initialize_x"]["inputs"]["variables"][0]["value"];
-        assert_eq!(v.as_str().unwrap(), "@{sub(10, 4)}");
+        assert_eq!(v.as_str().unwrap(), "@sub(10, 4)");
 
         let out = compile("var x: int = 6 * 7");
         let v = &out["definition"]["actions"]["Initialize_x"]["inputs"]["variables"][0]["value"];
-        assert_eq!(v.as_str().unwrap(), "@{mul(6, 7)}");
+        assert_eq!(v.as_str().unwrap(), "@mul(6, 7)");
 
         let out = compile("var x: int = 20 / 4");
         let v = &out["definition"]["actions"]["Initialize_x"]["inputs"]["variables"][0]["value"];
-        assert_eq!(v.as_str().unwrap(), "@{div(20, 4)}");
+        assert_eq!(v.as_str().unwrap(), "@div(20, 4)");
     }
 
     #[test]
     fn slice15_precedence_multiplicative_binds_tighter() {
         let out = compile("var x: int = 2 + 3 * 4");
         let v = &out["definition"]["actions"]["Initialize_x"]["inputs"]["variables"][0]["value"];
-        assert_eq!(v.as_str().unwrap(), "@{add(2, mul(3, 4))}");
+        assert_eq!(v.as_str().unwrap(), "@add(2, mul(3, 4))");
     }
 
     #[test]
     fn slice15_left_associative() {
         let out = compile("var x: int = 10 - 4 - 1");
         let v = &out["definition"]["actions"]["Initialize_x"]["inputs"]["variables"][0]["value"];
-        assert_eq!(v.as_str().unwrap(), "@{sub(sub(10, 4), 1)}");
+        assert_eq!(v.as_str().unwrap(), "@sub(sub(10, 4), 1)");
     }
 
     #[test]
@@ -713,7 +717,7 @@ var msg: string = "count: " & total + 1"#,
         let v = &out["definition"]["actions"]["Initialize_msg"]["inputs"]["variables"][0]["value"];
         assert_eq!(
             v.as_str().unwrap(),
-            "@{concat('count: ', add(variables('total'), 1))}"
+            "@concat('count: ', add(variables('total'), 1))"
         );
     }
 
@@ -730,7 +734,7 @@ var msg: string = "count: " & total + 1"#,
             let src = format!("var a: int = 5\nlet check = a {op} 10");
             let out = compile(&src);
             let v = &out["definition"]["actions"]["Compose_check"]["inputs"];
-            let expected = format!("@{{{}(variables('a'), 10)}}", fn_name);
+            let expected = format!("@{}(variables('a'), 10)", fn_name);
             assert_eq!(v.as_str().unwrap(), expected, "op: {op}");
         }
     }
@@ -739,7 +743,7 @@ var msg: string = "count: " & total + 1"#,
     fn slice16_not_equals_synthesized_via_not() {
         let out = compile("var a: int = 5\nlet check = a != 10");
         let v = &out["definition"]["actions"]["Compose_check"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@{not(equals(variables('a'), 10))}");
+        assert_eq!(v.as_str().unwrap(), "@not(equals(variables('a'), 10))");
     }
 
     #[test]
@@ -774,14 +778,11 @@ if ok {
     fn slice17_logical_and_or_emit_pa_functions() {
         let out = compile("var a: bool = true\nvar b: bool = false\nlet c = a && b");
         let v = &out["definition"]["actions"]["Compose_c"]["inputs"];
-        assert_eq!(
-            v.as_str().unwrap(),
-            "@{and(variables('a'), variables('b'))}"
-        );
+        assert_eq!(v.as_str().unwrap(), "@and(variables('a'), variables('b'))");
 
         let out = compile("var a: bool = true\nvar b: bool = false\nlet c = a || b");
         let v = &out["definition"]["actions"]["Compose_c"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@{or(variables('a'), variables('b'))}");
+        assert_eq!(v.as_str().unwrap(), "@or(variables('a'), variables('b'))");
     }
 
     #[test]
@@ -795,7 +796,7 @@ let x = a || b && c"#,
         let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
         assert_eq!(
             v.as_str().unwrap(),
-            "@{or(variables('a'), and(variables('b'), variables('c')))}"
+            "@or(variables('a'), and(variables('b'), variables('c')))"
         );
     }
 
@@ -803,14 +804,14 @@ let x = a || b && c"#,
     fn slice17_unary_not_emits_not() {
         let out = compile("var a: bool = true\nlet x = !a");
         let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@{not(variables('a'))}");
+        assert_eq!(v.as_str().unwrap(), "@not(variables('a'))");
     }
 
     #[test]
     fn slice17_unary_neg_emits_sub_from_zero() {
         let out = compile("var a: int = 5\nlet x = -a");
         let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@{sub(0, variables('a'))}");
+        assert_eq!(v.as_str().unwrap(), "@sub(0, variables('a'))");
     }
 
     #[test]
@@ -856,7 +857,7 @@ if !ok {
 let n = length("hello")"#,
         );
         let v = &out["definition"]["actions"]["Compose_n"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@{length('hello')}");
+        assert_eq!(v.as_str().unwrap(), "@length('hello')");
     }
 
     #[test]
@@ -869,7 +870,7 @@ let msg = concat("done ", completed, " of ", total)"#,
         let v = &out["definition"]["actions"]["Compose_msg"]["inputs"];
         assert_eq!(
             v.as_str().unwrap(),
-            "@{concat('done ', variables('completed'), ' of ', variables('total'))}"
+            "@concat('done ', variables('completed'), ' of ', variables('total'))"
         );
     }
 
@@ -880,7 +881,7 @@ let msg = concat("done ", completed, " of ", total)"#,
 let n = length(concat("x", "y"))"#,
         );
         let v = &out["definition"]["actions"]["Compose_n"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@{length(concat('x', 'y'))}");
+        assert_eq!(v.as_str().unwrap(), "@length(concat('x', 'y'))");
     }
 
     #[test]
@@ -920,32 +921,32 @@ if length(items) {
     fn v1_1_bool_literals_inside_expressions() {
         let out = compile("var flag: bool = true\nlet x = flag == true");
         let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@{equals(variables('flag'), true)}");
+        assert_eq!(v.as_str().unwrap(), "@equals(variables('flag'), true)");
 
         let out = compile("var flag: bool = true\nlet y = flag == false");
         let v = &out["definition"]["actions"]["Compose_y"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@{equals(variables('flag'), false)}");
+        assert_eq!(v.as_str().unwrap(), "@equals(variables('flag'), false)");
     }
 
     #[test]
     fn v1_1_null_literal_inside_expression() {
         let out = compile("var results: object = {}\nlet z = results == null");
         let v = &out["definition"]["actions"]["Compose_z"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@{equals(variables('results'), null)}");
+        assert_eq!(v.as_str().unwrap(), "@equals(variables('results'), null)");
     }
 
     #[test]
     fn v1_1_chained_unary_not() {
         let out = compile("var a: bool = true\nlet x = !!a");
         let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@{not(not(variables('a')))}");
+        assert_eq!(v.as_str().unwrap(), "@not(not(variables('a')))");
     }
 
     #[test]
     fn v1_1_chained_unary_neg() {
         let out = compile("var n: int = 5\nlet y = --n");
         let v = &out["definition"]["actions"]["Compose_y"]["inputs"];
-        assert_eq!(v.as_str().unwrap(), "@{sub(0, sub(0, variables('n')))}");
+        assert_eq!(v.as_str().unwrap(), "@sub(0, sub(0, variables('n')))");
     }
 
     #[test]
@@ -955,10 +956,7 @@ if length(items) {
 let greeting = "hello " & name"#,
         );
         let v = &out["definition"]["actions"]["Compose_greeting"]["inputs"];
-        assert_eq!(
-            v.as_str().unwrap(),
-            "@{concat('hello ', variables('name'))}"
-        );
+        assert_eq!(v.as_str().unwrap(), "@concat('hello ', variables('name'))");
     }
 
     #[test]
@@ -971,7 +969,7 @@ let x = a != b && a > 0"#,
         let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
         assert_eq!(
             v.as_str().unwrap(),
-            "@{and(not(equals(variables('a'), variables('b'))), greater(variables('a'), 0))}"
+            "@and(not(equals(variables('a'), variables('b'))), greater(variables('a'), 0))"
         );
     }
 
@@ -985,7 +983,7 @@ let x = a != b || a == 0"#,
         let v = &out["definition"]["actions"]["Compose_x"]["inputs"];
         assert_eq!(
             v.as_str().unwrap(),
-            "@{or(not(equals(variables('a'), variables('b'))), equals(variables('a'), 0))}"
+            "@or(not(equals(variables('a'), variables('b'))), equals(variables('a'), 0))"
         );
     }
 
@@ -999,7 +997,7 @@ var message: string = greeting & ", world""#,
             &out["definition"]["actions"]["Initialize_message"]["inputs"]["variables"][0]["value"];
         assert_eq!(
             msg_value.as_str().unwrap(),
-            "@{concat(variables('greeting'), ', world')}"
+            "@concat(variables('greeting'), ', world')"
         );
     }
 
