@@ -45,7 +45,7 @@ Triggers are file-based: drop a single `pa/<Name>.trigger.json` next to the sour
 Requires Rust (edition 2024, toolchain 1.85+). If you don't have Rust, install it first via [rustup](https://rustup.rs).
 
 ```sh
-cargo install --git https://github.com/anderix/paxc
+cargo install --git https://github.com/excelano/paxc
 ```
 
 This builds both `paxc` and `paxr` and places them in `~/.cargo/bin/`, which should already be on your `PATH` after a standard rustup install.
@@ -53,7 +53,7 @@ This builds both `paxc` and `paxr` and places them in `~/.cargo/bin/`, which sho
 ## Building from source
 
 ```sh
-git clone https://github.com/anderix/paxc
+git clone https://github.com/excelano/paxc
 cd paxc
 cargo build --release
 ```

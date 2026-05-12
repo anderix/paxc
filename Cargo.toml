@@ -5,7 +5,7 @@ edition = "2024"
 description = "A compiler for the pax DSL, producing Power Automate cloud flow definitions"
 license = "MIT"
 authors = ["David M. Anderson"]
-repository = "https://github.com/anderix/paxc"
+repository = "https://github.com/excelano/paxc"
 keywords = ["power-automate", "dsl", "compiler", "logic-apps", "workflow"]
 categories = ["command-line-utilities", "compilers"]
 
