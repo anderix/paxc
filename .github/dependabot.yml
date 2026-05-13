@@ -1,5 +1,6 @@
-# Dependabot keeps cargo and GitHub Actions dependencies current so
-# security fixes show up as PRs rather than slipping past.
+# Dependabot keeps cargo dependencies current so security fixes show up
+# as PRs rather than slipping past. Add a github-actions ecosystem entry
+# when a workflow lands under .github/workflows/.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -9,10 +10,3 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps"
-  - package-ecosystem: github-actions
-    directory: "/"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "ci"
